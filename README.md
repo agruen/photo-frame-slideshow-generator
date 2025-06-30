@@ -22,15 +22,37 @@ A Python script that automatically crops photos to fit your display resolution w
 
 ### Dependencies Installation
 
-#### Install Python packages:
+#### For macOS Users (Recommended Setup with Virtual Environment)
+
+Modern macOS requires using Python virtual environments. Follow these steps:
+
+1. **Create and activate a virtual environment:**
+   ```bash
+   python3 -m venv photo-slideshow-env
+   source photo-slideshow-env/bin/activate
+   ```
+
+2. **Install system dependencies:**
+   ```bash
+   brew install cmake
+   ```
+
+3. **Install Python packages:**
+   ```bash
+   pip install opencv-python dlib
+   ```
+
+4. **To run the script later, always activate the environment first:**
+   ```bash
+   source photo-slideshow-env/bin/activate
+   python crop-and-slideshow.py
+   ```
+
+#### For Other Platforms:
+
+**General Python packages:**
 ```bash
 pip install opencv-python dlib
-```
-
-#### For macOS users with Homebrew:
-```bash
-brew install cmake
-pip install dlib
 ```
 
 #### For Ubuntu/Debian users:
@@ -71,11 +93,17 @@ Edit the configuration variables at the top of `crop-and-slideshow.py`:
 # Configuration - Edit these settings as needed
 IMAGE_DIRECTORY = "."      # Directory containing source images
 ZIP_CODE = "10009"         # Your ZIP code for weather data
+WEATHER_API_KEY = "YOUR_API_KEY_HERE"  # OpenWeatherMap API key
 OUTPUT_FOLDER = "output"   # Subfolder for processed images and HTML
 
 # Screen Resolution Settings
 SCREEN_WIDTH = 1280        # Target screen width in pixels
 SCREEN_HEIGHT = 800        # Target screen height in pixels
+
+# Face Detection Settings
+MIN_FACE_PADDING_RATIO = 0.15  # Minimum padding around faces (15% of face height)
+MAX_FACE_PADDING_PX = 100      # Maximum padding in pixels
+FACE_DEBUG = False              # Set to True to see face detection details
 ```
 
 ### 2. Common Display Resolutions
@@ -93,14 +121,22 @@ Update `SCREEN_WIDTH` and `SCREEN_HEIGHT` for your display:
 
 ### 3. Weather API Setup
 
-The script uses OpenWeatherMap API for weather data. The included API key has usage limits. For production use:
+The script uses OpenWeatherMap API for weather data.
 
-1. Sign up at [OpenWeatherMap](https://openweathermap.org/api)
-2. Get your free API key
-3. Replace the API key in the script:
+**⚠️ API Key Required:**
+1. Sign up at [OpenWeatherMap](https://openweathermap.org/api) for a free API key
+2. Edit the configuration in `crop-and-slideshow.py`:
    ```python
-   var apiKey = 'YOUR_API_KEY_HERE';
+   WEATHER_API_KEY = "YOUR_API_KEY_HERE"
    ```
+
+**Rate Limiting:**
+The weather updates every 4 minutes (240 seconds) to stay within the free API limits:
+- Free tier: 1,000 calls/day
+- 4-minute intervals = ~360 calls/day
+- Leaves room for initial loads and testing
+
+To change the update frequency, modify the interval in the generated HTML, but be mindful of API limits.
 
 ## Usage
 
@@ -121,13 +157,41 @@ python crop-and-slideshow.py
 
 ## How It Works
 
-### Image Processing Logic
+### Advanced Face Detection
+
+The script includes intelligent face detection that ensures all faces in group photos remain visible:
+
+**Enhanced Face Detection Features:**
+- **Adaptive Padding**: Padding scales with face size (15% of face height, max 100px)
+- **Multiple Face Support**: Detects and includes ALL faces in the crop area
+- **Smart Centering**: When cropping is needed, centers on the collective center of all faces
+- **Validation**: Verifies all faces remain within final crop boundaries
+
+**Face Debug Mode:**
+To troubleshoot face detection, enable debug mode:
+```python
+FACE_DEBUG = True
+```
+
+This will show detailed output like:
+```
+Found 3 faces in family_photo.jpg
+  Face 1: Y=120-180, padding=25px
+  Face 2: Y=140-200, padding=30px  
+  Face 3: Y=110-170, padding=28px
+  Crop region: Y=85-685 (height=800)
+  All faces in bounds: True
+```
+
+**Processing Logic:**
 
 **With Face Detection:**
 1. Resizes images to target width while maintaining aspect ratio
-2. Detects faces using dlib's facial landmark detection
-3. Crops to target height ensuring all faces remain visible
-4. Adds padding around faces for better composition
+2. Detects all faces using dlib's facial landmark detection
+3. Calculates adaptive padding for each face based on size
+4. Creates crop boundaries that include all faces with padding
+5. Validates all faces remain visible in final crop
+6. Centers crop on faces if adjustment is needed
 
 **Without Face Detection:**
 1. Resizes images to target width
@@ -164,11 +228,15 @@ pip install opencv-python
 **Face detection not working:**
 - Ensure `shape_predictor_68_face_landmarks.dat` is in the same directory
 - The script will still work without it, cropping from center instead
+- Enable `FACE_DEBUG = True` to see what faces are being detected
+- Check that images have clear, front-facing faces for best detection
 
 **Weather not loading:**
 - Check internet connection
-- Verify ZIP_CODE is correct
-- API key may have hit rate limits (sign up for your own key)
+- Verify ZIP_CODE is correct (US format like "10001")
+- Ensure WEATHER_API_KEY is set to your OpenWeatherMap API key
+- API key may have hit daily rate limits (free tier = 1,000 calls/day)
+- Check browser console for API error messages
 
 **Images appear stretched:**
 - Verify SCREEN_WIDTH and SCREEN_HEIGHT match your actual display resolution
@@ -185,8 +253,17 @@ pip install opencv-python
 ### Slideshow Timing
 Edit these values in the HTML section:
 ```javascript
-}, 60000); // Change slideshow interval (60000 = 60 seconds)
-}, 240000); // Change weather update interval (240000 = 4 minutes)
+}, 60000);  // Change slideshow interval (60000 = 60 seconds)
+}, 240000); // Weather update interval (240000 = 4 minutes)
+             // ⚠️ Don't reduce below 4 minutes to avoid exceeding API limits
+```
+
+### Face Detection Customization
+Adjust face detection behavior in the configuration:
+```python
+MIN_FACE_PADDING_RATIO = 0.15  # Increase for more padding around faces
+MAX_FACE_PADDING_PX = 100      # Maximum padding to prevent excessive margins
+FACE_DEBUG = True               # Enable to see face detection details
 ```
 
 ### Styling

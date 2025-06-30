@@ -42,6 +42,11 @@ OUTPUT_FOLDER = "output"  # Subfolder where cropped images and HTML will be save
 SCREEN_WIDTH = 1280    # Target screen width in pixels
 SCREEN_HEIGHT = 800    # Target screen height in pixels
 
+# Face Detection Settings - Configure for better face inclusion
+MIN_FACE_PADDING_RATIO = 0.15  # Minimum padding around faces as ratio of face height
+MAX_FACE_PADDING_PX = 100      # Maximum padding in pixels to prevent excessive margins
+FACE_DEBUG = False              # Set to True to print face detection debugging info
+
 import cv2
 import dlib
 import os
@@ -168,22 +173,78 @@ def process_image(args):
                     faces = detector(gray)
                     
                     if len(faces) > 0:
-                        # Extract face boundary coordinates (top and bottom Y positions)
-                        face_coords = [(face.top(), face.bottom()) for face in faces]
-                        # Find the overall bounding box that includes all detected faces
-                        y_min = max(0, min(face[0] for face in face_coords) - 30)  # Add 30px padding above
-                        y_max = min(new_h, max(face[1] for face in face_coords) + 30)  # Add 30px padding below
+                        # Extract detailed face information for better cropping
+                        face_data = []
+                        for face in faces:
+                            face_height = face.bottom() - face.top()
+                            face_width = face.right() - face.left()
+                            # Calculate adaptive padding based on face size
+                            padding = min(MAX_FACE_PADDING_PX, int(face_height * MIN_FACE_PADDING_RATIO))
+                            face_data.append({
+                                'top': face.top(),
+                                'bottom': face.bottom(),
+                                'left': face.left(),
+                                'right': face.right(),
+                                'height': face_height,
+                                'width': face_width,
+                                'padding': padding
+                            })
+                        
+                        if FACE_DEBUG:
+                            print(f"Found {len(faces)} faces in {os.path.basename(image_file)}")
+                            for i, face in enumerate(face_data):
+                                print(f"  Face {i+1}: Y={face['top']}-{face['bottom']}, padding={face['padding']}px")
+                        
+                        # Calculate crop boundaries that include ALL faces with adequate padding
+                        y_min = max(0, min(face['top'] - face['padding'] for face in face_data))
+                        y_max = min(new_h, max(face['bottom'] + face['padding'] for face in face_data))
+                        
+                        # Verify all faces will be included in the final crop
+                        faces_in_bounds = True
+                        for face in face_data:
+                            if face['top'] < y_min or face['bottom'] > y_max:
+                                faces_in_bounds = False
+                                break
+                        
+                        if not faces_in_bounds:
+                            # Recalculate with minimum padding to ensure all faces fit
+                            min_padding = 20  # Absolute minimum padding
+                            y_min = max(0, min(face['top'] - min_padding for face in face_data))
+                            y_max = min(new_h, max(face['bottom'] + min_padding for face in face_data))
                         
                         # Ensure the crop region is exactly target_height pixels tall
-                        if y_max - y_min < target_height:
+                        current_height = y_max - y_min
+                        if current_height < target_height:
                             # Expand the crop region symmetrically to reach target height
-                            diff = target_height - (y_max - y_min)
+                            diff = target_height - current_height
                             y_min = max(0, y_min - diff//2)
                             y_max = y_min + target_height
                             # Handle edge case where expansion goes beyond image bounds
                             if y_max > new_h:
                                 y_max = new_h
                                 y_min = new_h - target_height
+                        elif current_height > target_height:
+                            # Crop region is too tall, need to trim while keeping faces
+                            # Priority: keep face centers in the crop
+                            face_centers = [(face['top'] + face['bottom']) // 2 for face in face_data]
+                            center_of_faces = sum(face_centers) // len(face_centers)
+                            
+                            # Adjust crop to target_height centered on faces
+                            y_min = max(0, center_of_faces - target_height//2)
+                            y_max = y_min + target_height
+                            if y_max > new_h:
+                                y_max = new_h
+                                y_min = new_h - target_height
+                        
+                        # Final validation: check if all faces are still in bounds
+                        final_faces_in_bounds = all(
+                            face['top'] >= y_min and face['bottom'] <= y_max 
+                            for face in face_data
+                        )
+                        
+                        if FACE_DEBUG:
+                            print(f"  Crop region: Y={y_min}-{y_max} (height={y_max-y_min})")
+                            print(f"  All faces in bounds: {final_faces_in_bounds}")
                         
                         # Crop the image vertically, keeping full width
                         cropped_image = resized_image[y_min:y_max, :]
@@ -220,23 +281,78 @@ def process_image(args):
                 faces = detector(gray)
                 
                 if len(faces) > 0:
-                    # Extract face boundary coordinates for all detected faces
-                    face_coords = [(face.top(), face.bottom()) for face in faces]
+                    # Extract detailed face information for better cropping
+                    face_data = []
+                    for face in faces:
+                        face_height = face.bottom() - face.top()
+                        face_width = face.right() - face.left()
+                        # Calculate adaptive padding based on face size
+                        padding = min(MAX_FACE_PADDING_PX, int(face_height * MIN_FACE_PADDING_RATIO))
+                        face_data.append({
+                            'top': face.top(),
+                            'bottom': face.bottom(),
+                            'left': face.left(),
+                            'right': face.right(),
+                            'height': face_height,
+                            'width': face_width,
+                            'padding': padding
+                        })
                     
-                    # Create bounding box that encompasses all faces with padding
-                    y_min = max(0, min(face[0] for face in face_coords) - 30)  # Top boundary with padding
-                    y_max = min(new_h, max(face[1] for face in face_coords) + 30)  # Bottom boundary with padding
+                    if FACE_DEBUG:
+                        print(f"Found {len(faces)} faces in {os.path.basename(image_file)} (portrait)")
+                        for i, face in enumerate(face_data):
+                            print(f"  Face {i+1}: Y={face['top']}-{face['bottom']}, padding={face['padding']}px")
+                    
+                    # Calculate crop boundaries that include ALL faces with adequate padding
+                    y_min = max(0, min(face['top'] - face['padding'] for face in face_data))
+                    y_max = min(new_h, max(face['bottom'] + face['padding'] for face in face_data))
+                    
+                    # Verify all faces will be included in the final crop
+                    faces_in_bounds = True
+                    for face in face_data:
+                        if face['top'] < y_min or face['bottom'] > y_max:
+                            faces_in_bounds = False
+                            break
+                    
+                    if not faces_in_bounds:
+                        # Recalculate with minimum padding to ensure all faces fit
+                        min_padding = 20  # Absolute minimum padding
+                        y_min = max(0, min(face['top'] - min_padding for face in face_data))
+                        y_max = min(new_h, max(face['bottom'] + min_padding for face in face_data))
                     
                     # Ensure final crop is exactly target_height pixels tall
-                    if y_max - y_min < target_height:
+                    current_height = y_max - y_min
+                    if current_height < target_height:
                         # Expand crop region to meet target height requirement
-                        diff = target_height - (y_max - y_min)
+                        diff = target_height - current_height
                         y_min = max(0, y_min - diff//2)
                         y_max = y_min + target_height
                         # Adjust if expansion exceeds image boundaries
                         if y_max > new_h:
                             y_max = new_h
                             y_min = new_h - target_height
+                    elif current_height > target_height:
+                        # Crop region is too tall, need to trim while keeping faces
+                        # Priority: keep face centers in the crop
+                        face_centers = [(face['top'] + face['bottom']) // 2 for face in face_data]
+                        center_of_faces = sum(face_centers) // len(face_centers)
+                        
+                        # Adjust crop to target_height centered on faces
+                        y_min = max(0, center_of_faces - target_height//2)
+                        y_max = y_min + target_height
+                        if y_max > new_h:
+                            y_max = new_h
+                            y_min = new_h - target_height
+                    
+                    # Final validation: check if all faces are still in bounds
+                    final_faces_in_bounds = all(
+                        face['top'] >= y_min and face['bottom'] <= y_max 
+                        for face in face_data
+                    )
+                    
+                    if FACE_DEBUG:
+                        print(f"  Crop region: Y={y_min}-{y_max} (height={y_max-y_min})")
+                        print(f"  All faces in bounds: {final_faces_in_bounds}")
                     
                     # Apply the calculated crop boundaries
                     cropped_image = resized_image[y_min:y_max, :]
