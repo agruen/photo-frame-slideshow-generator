@@ -1,11 +1,44 @@
 #!/usr/bin/env python3
+"""
+Photo Frame Slideshow Generator
+
+This script processes a collection of images to create an optimized slideshow for digital photo frames.
+It automatically crops and resizes images to fit a target screen resolution while preserving faces
+using face detection technology. The output includes processed images and an HTML slideshow with
+weather information and clock display.
+
+Features:
+- Intelligent cropping with face detection
+- Multi-core parallel processing for fast batch operations
+- Responsive HTML slideshow with weather integration
+- Support for multiple image formats (JPG, PNG, GIF)
+- Configurable screen resolution targeting
+
+Requirements:
+- OpenCV (cv2)
+- dlib with face landmarks model
+- shape_predictor_68_face_landmarks.dat file
+- OpenWeatherMap API key (free at openweathermap.org/api)
+
+Setup:
+1. Get a free API key from openweathermap.org/api
+2. Edit the WEATHER_API_KEY variable at the top of this script
+3. Set your ZIP_CODE for local weather
+
+Usage:
+    python crop-and-slideshow.py
+
+The script will process all images in the configured directory and create an 'output' folder
+containing the processed images and slideshow HTML file.
+"""
 
 # Configuration - Edit these settings as needed
 IMAGE_DIRECTORY = "."  # Directory containing source images (current folder by default)
-ZIP_CODE = "10001"     # Your ZIP code for weather data
+ZIP_CODE = "10001"     # Your ZIP code for weather data (US format)
+WEATHER_API_KEY = "YOUR_API_KEY_HERE"  # OpenWeatherMap API key (get free key at openweathermap.org/api)
 OUTPUT_FOLDER = "output"  # Subfolder where cropped images and HTML will be saved
 
-# Screen Resolution Settings
+# Screen Resolution Settings - Configure for your display device
 SCREEN_WIDTH = 1280    # Target screen width in pixels
 SCREEN_HEIGHT = 800    # Target screen height in pixels
 
@@ -17,7 +50,22 @@ from glob import glob
 from multiprocessing import Pool, cpu_count
 
 def setup_directories():
-    """Create output directory and ensure face landmarks file exists"""
+    """
+    Initialize the directory structure and check for required files.
+    
+    Creates the output directory if it doesn't exist and verifies that the
+    dlib face landmarks model file is available for face detection.
+    
+    Returns:
+        tuple: A 3-tuple containing:
+            - image_dir (str): Absolute path to the source image directory
+            - output_dir (str): Absolute path to the output directory
+            - landmarks_file (str or None): Path to face landmarks file, or None if not found
+    
+    Note:
+        If the landmarks file is not found, face detection will be disabled and
+        images will be cropped from the center instead.
+    """
     script_dir = os.path.dirname(os.path.abspath(__file__))
     image_dir = os.path.join(script_dir, IMAGE_DIRECTORY) if IMAGE_DIRECTORY != "." else script_dir
     output_dir = os.path.join(script_dir, OUTPUT_FOLDER)
@@ -32,7 +80,23 @@ def setup_directories():
     return image_dir, output_dir, landmarks_file
 
 def find_image_files(directory):
-    """Find all image files in the specified directory"""
+    """
+    Scan a directory for supported image files.
+    
+    Searches for common image file extensions in both lowercase and uppercase
+    variations to ensure compatibility across different file naming conventions.
+    
+    Args:
+        directory (str): Path to the directory to search for images
+    
+    Returns:
+        list: List of absolute file paths to discovered image files
+        
+    Supported formats:
+        - JPEG (.jpg, .jpeg)
+        - PNG (.png)
+        - GIF (.gif)
+    """
     image_extensions = ['jpg', 'jpeg', 'png', 'gif']
     image_files = []
     
@@ -43,60 +107,94 @@ def find_image_files(directory):
     return image_files
 
 def process_image(args):
-    """Process a single image: resize and crop to 1280x800 with face detection"""
+    """
+    Process a single image with intelligent cropping and resizing.
+    
+    This function handles the core image processing pipeline:
+    1. Load and validate the image
+    2. Determine orientation (landscape vs portrait)
+    3. Resize to fit target dimensions while maintaining aspect ratio
+    4. Apply intelligent cropping using face detection when available
+    5. Save the processed image to the output directory
+    
+    The cropping algorithm prioritizes keeping faces visible in the final image.
+    When faces are detected, the crop boundaries are adjusted to include all faces
+    with some padding. If no faces are detected or face detection is unavailable,
+    the image is cropped from the center.
+    
+    Args:
+        args (tuple): A 4-tuple containing:
+            - image_file (str): Path to the source image file
+            - output_dir (str): Directory where processed image will be saved
+            - detector: dlib face detector object (or None if unavailable)
+            - predictor: dlib shape predictor object (or None if unavailable)
+    
+    Returns:
+        str or None: Filename of the successfully processed image, or None if processing failed
+        
+    Raises:
+        Exception: Various exceptions may occur during image processing, which are caught
+                  and logged with the specific image filename for debugging
+    """
     image_file, output_dir, detector, predictor = args
     
     try:
-        # Load the image with OpenCV
+        # Load the image with OpenCV (BGR color format)
         image = cv2.imread(image_file)
         if image is None:
             print(f"Could not load image: {image_file}")
             return None
             
+        # Get original image dimensions (height, width, channels)
         h, w, _ = image.shape
         
-        # Target dimensions for display
+        # Target dimensions for display device
         target_width = SCREEN_WIDTH
         target_height = SCREEN_HEIGHT
         
-        # For landscape images
+        # Process landscape images (wider than tall)
         if w >= h:
+            # Calculate new dimensions maintaining aspect ratio, fitting to screen width
             aspect_ratio = h / w
             new_w = target_width
             new_h = int(new_w * aspect_ratio)
             resized_image = cv2.resize(image, (new_w, new_h))
             
-            # If the resized height is greater than target_height, crop to target_height
+            # If resized image is taller than screen, we need to crop vertically
             if new_h > target_height:
                 if detector is not None:
-                    # Convert to grayscale for face detection
+                    # Convert to grayscale for dlib face detection (required format)
                     gray = cv2.cvtColor(resized_image, cv2.COLOR_BGR2GRAY)
                     faces = detector(gray)
                     
                     if len(faces) > 0:
-                        # Get face coordinates
+                        # Extract face boundary coordinates (top and bottom Y positions)
                         face_coords = [(face.top(), face.bottom()) for face in faces]
-                        y_min = max(0, min(face[0] for face in face_coords) - 30)
-                        y_max = min(new_h, max(face[1] for face in face_coords) + 30)
+                        # Find the overall bounding box that includes all detected faces
+                        y_min = max(0, min(face[0] for face in face_coords) - 30)  # Add 30px padding above
+                        y_max = min(new_h, max(face[1] for face in face_coords) + 30)  # Add 30px padding below
                         
-                        # Adjust to get target_height tall image
+                        # Ensure the crop region is exactly target_height pixels tall
                         if y_max - y_min < target_height:
+                            # Expand the crop region symmetrically to reach target height
                             diff = target_height - (y_max - y_min)
                             y_min = max(0, y_min - diff//2)
                             y_max = y_min + target_height
+                            # Handle edge case where expansion goes beyond image bounds
                             if y_max > new_h:
                                 y_max = new_h
                                 y_min = new_h - target_height
                         
+                        # Crop the image vertically, keeping full width
                         cropped_image = resized_image[y_min:y_max, :]
                     else:
-                        # No faces detected, crop from center
+                        # No faces detected - fall back to center cropping
                         y_center = new_h // 2
                         y_min = max(0, y_center - target_height//2)
                         y_max = min(new_h, y_center + target_height//2)
                         cropped_image = resized_image[y_min:y_max, :]
                 else:
-                    # No face detection available, crop from center
+                    # Face detection not available - use center cropping
                     y_center = new_h // 2
                     y_min = max(0, y_center - target_height//2)
                     y_max = min(new_h, y_center + target_height//2)
@@ -106,58 +204,62 @@ def process_image(args):
             else:
                 final_image = resized_image
         
-        # For portrait images
+        # Process portrait images (taller than wide)
         else:
-            # Resize the image to be target_width wide
+            # Scale image to fit screen width, maintaining aspect ratio
             aspect_ratio = h / w
             new_w = target_width
             new_h = int(new_w * aspect_ratio)
             resized_image = cv2.resize(image, (new_w, new_h))
             
             if detector is not None:
-                # Convert the image to grayscale for face detection
+                # Convert to grayscale for dlib face detection
                 gray = cv2.cvtColor(resized_image, cv2.COLOR_BGR2GRAY)
                 
-                # Detect faces
+                # Run face detection on the resized image
                 faces = detector(gray)
                 
                 if len(faces) > 0:
-                    # Get the coordinates of faces
+                    # Extract face boundary coordinates for all detected faces
                     face_coords = [(face.top(), face.bottom()) for face in faces]
                     
-                    # Calculate the crop boundaries to include all faces
-                    y_min = max(0, min(face[0] for face in face_coords) - 30)  
-                    y_max = min(new_h, max(face[1] for face in face_coords) + 30)  
+                    # Create bounding box that encompasses all faces with padding
+                    y_min = max(0, min(face[0] for face in face_coords) - 30)  # Top boundary with padding
+                    y_max = min(new_h, max(face[1] for face in face_coords) + 30)  # Bottom boundary with padding
                     
-                    # Adjust the y_min and y_max to get target_height tall image
+                    # Ensure final crop is exactly target_height pixels tall
                     if y_max - y_min < target_height:
+                        # Expand crop region to meet target height requirement
                         diff = target_height - (y_max - y_min)
                         y_min = max(0, y_min - diff//2)
                         y_max = y_min + target_height
+                        # Adjust if expansion exceeds image boundaries
                         if y_max > new_h:
                             y_max = new_h
                             y_min = new_h - target_height
                     
+                    # Apply the calculated crop boundaries
                     cropped_image = resized_image[y_min:y_max, :]
                     final_image = cropped_image
                 else:
-                    # No faces detected, crop from center to target_height
+                    # No faces found - use center-based cropping strategy
                     y_center = new_h // 2
                     y_min = max(0, y_center - target_height//2)
                     y_max = min(new_h, y_center + target_height//2)
                     cropped_image = resized_image[y_min:y_max, :]
                     final_image = cropped_image
             else:
-                # No face detection available, crop from center
+                # Face detection unavailable - default to center cropping
                 y_center = new_h // 2
                 y_min = max(0, y_center - target_height//2)
                 y_max = min(new_h, y_center + target_height//2)
                 cropped_image = resized_image[y_min:y_max, :]
                 final_image = cropped_image
         
-        # Save the processed image
+        # Save the processed image with descriptive filename prefix
         output_filename = f"processed_{os.path.basename(image_file)}"
         output_path = os.path.join(output_dir, output_filename)
+        # Write image using OpenCV (maintains quality and supports various formats)
         cv2.imwrite(output_path, final_image)
         return output_filename
         
@@ -165,11 +267,39 @@ def process_image(args):
         print(f"Error processing {image_file}: {e}")
         return None
 
-def generate_slideshow_html(processed_images, output_dir, zip_code):
-    """Generate HTML slideshow optimized for configured display resolution"""
+def generate_slideshow_html(processed_images, output_dir, zip_code, api_key):
+    """
+    Generate a full-screen HTML slideshow with weather and time display.
     
-    # Convert image paths to relative paths for the HTML
+    Creates a responsive HTML file that displays processed images in a slideshow format
+    with integrated weather information and digital clock. The slideshow is optimized
+    for the configured screen resolution and includes the following features:
+    
+    - Random image rotation every 60 seconds
+    - Real-time clock display (12-hour format)
+    - Weather information with icons and temperature
+    - Full-screen display optimized for digital photo frames
+    - Automatic weather data refresh every 4 minutes
+    
+    Args:
+        processed_images (list): List of processed image filenames to include in slideshow
+        output_dir (str): Directory where the HTML file will be saved
+        zip_code (str): US ZIP code for weather data retrieval
+        api_key (str): OpenWeatherMap API key for weather data access
+    
+    Returns:
+        str: Absolute path to the generated HTML slideshow file
+        
+    Note:
+        The weather functionality requires an internet connection and uses the
+        OpenWeatherMap API. The API key is embedded in the HTML for demonstration
+        purposes - in production, consider using environment variables or a backend service.
+    """
+    
+    # Convert image filenames to relative paths for HTML slideshow
+    # Filter out any None values from failed image processing
     image_list = [f"./{img}" for img in processed_images if img is not None]
+    # Convert to JSON format for embedding in JavaScript
     image_list_json = json.dumps(image_list)
     
     html_template = f"""<!DOCTYPE html>
@@ -239,19 +369,24 @@ def generate_slideshow_html(processed_images, output_dir, zip_code):
   </div>
 
   <script>
+    // Array of processed image paths for slideshow rotation
     var images = {image_list_json};
+    // Track when weather was last updated (rate limiting)
     var lastWeatherUpdate = 0;
 
+    // Select a random image from the available collection
     function getRandomImage(images) {{
       var index = Math.floor(Math.random() * images.length);
       return images[index];
     }}
 
+    // Update the background image with a random selection
     function updateSlideshow(images) {{
       var slideshow = document.getElementById("slideshow");
       slideshow.style.backgroundImage = "url('" + getRandomImage(images) + "')";
     }}
 
+    // Update the digital clock display with current time
     function updateClock() {{
       var clock = document.getElementById("clock");
       var currentDate = new Date();
@@ -259,52 +394,66 @@ def generate_slideshow_html(processed_images, output_dir, zip_code):
       var minutes = currentDate.getMinutes();
       var period = hours >= 12 ? "PM" : "AM";
 
-      // Convert to 12-hour format
+      // Convert from 24-hour to 12-hour format
       hours = hours % 12;
-      hours = hours ? hours : 12;
+      hours = hours ? hours : 12;  // Handle midnight (0 hours = 12 AM)
 
-      // Zero padding for minutes
+      // Add leading zero to minutes for consistent formatting
       minutes = minutes < 10 ? "0" + minutes : minutes;
 
+      // Display formatted time
       clock.innerHTML = hours + ":" + minutes + " " + period;
     }}
 
+    // Fetch and display current weather information
     function updateWeather(zipCode) {{
       var weatherDiv = document.getElementById("weather");
-      var apiKey = '3b90a894de37f00eed14f6d6d6ac9136';
+      // OpenWeatherMap API configuration
+      var apiKey = '{api_key}';
       var url = `https://api.openweathermap.org/data/2.5/weather?zip=${{zipCode}}&units=imperial&appid=${{apiKey}}`;
 
       var currentTime = new Date().getTime();
+      // Only update weather every 5 minutes (300000ms) to avoid rate limiting
       if (currentTime - lastWeatherUpdate >= 300000) {{
         fetch(url)
           .then(response => response.json())
           .then(data => {{
+            // Extract temperature and weather icon from API response
             var temperature = Math.round(data.main.temp);
             var icon = data.weather[0].icon;
             var iconUrl = `http://openweathermap.org/img/wn/${{icon}}@2x.png`;
+            // Display weather icon and temperature
             weatherDiv.innerHTML = `<img src="${{iconUrl}}" alt="weather icon"> ${{temperature}}°F`;
             lastWeatherUpdate = currentTime;
           }})
           .catch(error => {{
+            // Handle API errors gracefully
             weatherDiv.innerHTML = "Weather data not available";
             console.error('Error fetching weather data:', error);
           }});
       }}
     }}
 
+    // Initialize and start the slideshow with all interactive elements
     function startSlideshow(zipCode) {{
+      // Only start image rotation if we have images to display
       if (images.length > 0) {{
+        // Change slideshow image every 60 seconds (60000ms)
         setInterval(function() {{
           updateSlideshow(images);
         }}, 60000);
       }}
+      // Update clock every second for real-time display
       setInterval(updateClock, 1000);
+      // Check for weather updates every 4 minutes (240000ms)
       setInterval(function() {{
         updateWeather(zipCode);
       }}, 240000);
-      updateWeather(zipCode);
-      updateClock();
-      updateSlideshow(images);
+      
+      // Initialize display elements immediately
+      updateWeather(zipCode);   // Get initial weather data
+      updateClock();           // Show current time
+      updateSlideshow(images); // Display first image
     }}
 
     startSlideshow('{zip_code}');
@@ -320,7 +469,29 @@ def generate_slideshow_html(processed_images, output_dir, zip_code):
     return html_path
 
 def main():
-    """Main function to process images and generate slideshow"""
+    """
+    Main execution function that orchestrates the entire slideshow generation process.
+    
+    This function coordinates all the major steps:
+    1. Set up directories and check for required files
+    2. Discover all image files in the source directory
+    3. Initialize face detection capabilities if available
+    4. Process all images in parallel using multiprocessing
+    5. Generate the HTML slideshow with processed images
+    6. Provide user feedback and final instructions
+    
+    The function uses all available CPU cores for parallel image processing to
+    minimize processing time for large image collections.
+    
+    Returns:
+        None
+        
+    Side Effects:
+        - Creates output directory structure
+        - Processes and saves resized/cropped images
+        - Generates HTML slideshow file
+        - Prints progress information to console
+    """
     print("Setting up directories...")
     image_dir, output_dir, landmarks_file = setup_directories()
     
@@ -333,24 +504,29 @@ def main():
     
     print(f"Found {len(image_files)} images")
     
-    # Initialize face detection if landmarks file exists
+    # Initialize face detection components if the required model file exists
     detector = None
-    predictor = None
+    predictor = None  # Shape predictor for detailed facial landmarks (not used in current implementation)
     if landmarks_file:
         try:
+            # Load dlib's pre-trained face detector (HOG + Linear SVM)
             detector = dlib.get_frontal_face_detector()
+            # Load the 68-point facial landmark predictor model
             predictor = dlib.shape_predictor(landmarks_file)
             print("Face detection enabled")
         except Exception as e:
             print(f"Could not initialize face detection: {e}")
+            print("Falling back to center-based cropping")
     else:
         print("Face detection disabled - will crop from center")
     
-    # Prepare arguments for multiprocessing
+    # Prepare argument tuples for parallel processing
+    # Each worker process needs: (image_path, output_dir, face_detector, landmark_predictor)
     process_args = [(img_file, output_dir, detector, predictor) for img_file in image_files]
     
     print("Processing images...")
-    # Use multiprocessing to process images in parallel
+    # Utilize all available CPU cores for parallel image processing
+    # This significantly reduces processing time for large image collections
     with Pool(cpu_count()) as pool:
         processed_images = pool.map(process_image, process_args)
     
@@ -365,7 +541,7 @@ def main():
     
     # Generate HTML slideshow
     print("Generating slideshow HTML...")
-    html_path = generate_slideshow_html(successful_images, output_dir, ZIP_CODE)
+    html_path = generate_slideshow_html(successful_images, output_dir, ZIP_CODE, WEATHER_API_KEY)
     
     print(f"Complete! Output saved to: {output_dir}")
     print(f"Slideshow HTML: {html_path}")
