@@ -526,27 +526,61 @@ def generate_slideshow_html(processed_images, output_dir, zip_code, api_key):
       var weatherDiv = document.getElementById("weather");
       // OpenWeatherMap API configuration
       var apiKey = '{api_key}';
+      
+      // Check if API key is configured
+      if (apiKey === 'YOUR_API_KEY_HERE' || !apiKey || apiKey.length < 10) {{
+        weatherDiv.innerHTML = "Configure API key";
+        console.error('Weather API key not configured. Edit WEATHER_API_KEY in the script.');
+        return;
+      }}
+      
       var url = `https://api.openweathermap.org/data/2.5/weather?zip=${{zipCode}}&units=imperial&appid=${{apiKey}}`;
+      console.log('Weather API URL (without key):', url.replace(apiKey, '[HIDDEN]'));
 
       var currentTime = new Date().getTime();
       // Only update weather every 5 minutes (300000ms) to avoid rate limiting
       if (currentTime - lastWeatherUpdate >= 300000) {{
+        console.log('Fetching weather data...');
+        weatherDiv.innerHTML = "Loading weather...";
+        
         fetch(url)
-          .then(response => response.json())
+          .then(response => {{
+            console.log('Weather API response status:', response.status);
+            if (!response.ok) {{
+              throw new Error(`HTTP ${{response.status}}: ${{response.statusText}}`);
+            }}
+            return response.json();
+          }})
           .then(data => {{
+            console.log('Weather data received:', data);
+            // Check if response has expected structure
+            if (!data.main || !data.weather || !data.weather[0]) {{
+              throw new Error('Invalid weather data structure');
+            }}
             // Extract temperature and weather icon from API response
             var temperature = Math.round(data.main.temp);
             var icon = data.weather[0].icon;
-            var iconUrl = `http://openweathermap.org/img/wn/${{icon}}@2x.png`;
+            var iconUrl = `https://openweathermap.org/img/wn/${{icon}}@2x.png`;
             // Display weather icon and temperature
             weatherDiv.innerHTML = `<img src="${{iconUrl}}" alt="weather icon"> ${{temperature}}°F`;
             lastWeatherUpdate = currentTime;
+            console.log('Weather updated successfully');
           }})
           .catch(error => {{
-            // Handle API errors gracefully
-            weatherDiv.innerHTML = "Weather data not available";
-            console.error('Error fetching weather data:', error);
+            // Handle API errors gracefully with detailed error info
+            console.error('Weather API error:', error);
+            var errorMsg = "Weather unavailable";
+            if (error.message.includes('401')) {{
+              errorMsg = "Invalid API key";
+            }} else if (error.message.includes('404')) {{
+              errorMsg = "Invalid ZIP code";
+            }} else if (error.message.includes('429')) {{
+              errorMsg = "Rate limit exceeded";
+            }}
+            weatherDiv.innerHTML = errorMsg;
           }});
+      }} else {{
+        console.log('Weather update skipped (too soon)');
       }}
     }}
 
@@ -561,10 +595,12 @@ def generate_slideshow_html(processed_images, output_dir, zip_code, api_key):
       }}
       // Update clock every second for real-time display
       setInterval(updateClock, 1000);
-      // Check for weather updates every 4 minutes (240000ms)
+      // Check for weather updates every 5 minutes (300000ms)
       setInterval(function() {{
         updateWeather(zipCode);
-      }}, 240000);
+      }}, 300000);
+      
+      console.log('Slideshow initialized with ZIP code:', zipCode);
       
       // Initialize display elements immediately
       updateWeather(zipCode);   // Get initial weather data
