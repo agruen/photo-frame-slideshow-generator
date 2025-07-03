@@ -445,29 +445,28 @@ def generate_slideshow_html(processed_images, output_dir, zip_code, api_key):
         z-index: -1;
     }}
 
-    #info {{
-        position: absolute;
+    #clock {{
+        position: fixed;
         bottom: 30px;
         left: 30px;
-        width: calc(100% - 60px);
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
         font-family: Arial, sans-serif;
         font-size: 64px;
         font-weight: bold;
         color: white;
         z-index: 100;
-        text-align: center;
         text-shadow: 2px 0 0 #000, 0 -2px 0 #000, 0 2px 0 #000, -2px 0 0 #000;
     }}
 
-    #clock {{
-        text-align: left;
-    }}
-
     #weather {{
-        text-align: right;
+        position: fixed;
+        bottom: 30px;
+        right: 30px;
+        font-family: Arial, sans-serif;
+        font-size: 64px;
+        font-weight: bold;
+        color: white;
+        z-index: 100;
+        text-shadow: 2px 0 0 #000, 0 -2px 0 #000, 0 2px 0 #000, -2px 0 0 #000;
     }}
 
     #weather img {{
@@ -479,10 +478,8 @@ def generate_slideshow_html(processed_images, output_dir, zip_code, api_key):
 </head>
 <body>
   <div id="slideshow"></div>
-  <div id="info">
-    <div id="clock"></div>
-    <div id="weather"></div>
-  </div>
+  <div id="clock"></div>
+  <div id="weather"></div>
 
   <script>
     // Array of processed image paths for slideshow rotation
