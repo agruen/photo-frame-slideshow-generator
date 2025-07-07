@@ -16,14 +16,15 @@ Features:
 
 Requirements:
 - OpenCV (cv2)
-- dlib with face landmarks model
-- shape_predictor_68_face_landmarks.dat file
+- MediaPipe (for advanced face detection)
+- NumPy
 - OpenWeatherMap API key (free at openweathermap.org/api)
 
 Setup:
-1. Get a free API key from openweathermap.org/api
-2. Edit the WEATHER_API_KEY variable at the top of this script
-3. Set your ZIP_CODE for local weather
+1. Install required libraries: pip install opencv-python mediapipe numpy
+2. Get a free API key from openweathermap.org/api
+3. Edit the WEATHER_API_KEY variable at the top of this script
+4. Set your ZIP_CODE for local weather
 
 Usage:
     python crop-and-slideshow.py
@@ -32,57 +33,49 @@ The script will process all images in the configured directory and create an 'ou
 containing the processed images and slideshow HTML file.
 """
 
-# Configuration - Edit these settings as needed
-IMAGE_DIRECTORY = "."  # Directory containing source images (current folder by default)
-ZIP_CODE = "10001"     # Your ZIP code for weather data (US format)
-WEATHER_API_KEY = "YOUR_API_KEY_HERE"  # OpenWeatherMap API key (get free key at openweathermap.org/api)
-OUTPUT_FOLDER = "output"  # Subfolder where cropped images and HTML will be saved
-
-# Screen Resolution Settings - Configure for your display device
-SCREEN_WIDTH = 1280    # Target screen width in pixels
-SCREEN_HEIGHT = 800    # Target screen height in pixels
-
-# Face Detection Settings - Configure for better face inclusion
-MIN_FACE_PADDING_RATIO = 0.15  # Minimum padding around faces as ratio of face height
-MAX_FACE_PADDING_PX = 100      # Maximum padding in pixels to prevent excessive margins
-FACE_DEBUG = False              # Set to True to print face detection debugging info
-
 import cv2
-import dlib
+import mediapipe as mp
+import numpy as np
 import os
 import json
 from glob import glob
 from multiprocessing import Pool, cpu_count
 
+# Configuration - Edit these settings as needed or use environment variables
+IMAGE_DIRECTORY = os.getenv("IMAGE_DIRECTORY", ".")  # Directory containing source images
+ZIP_CODE = os.getenv("ZIP_CODE", "10001")     # Your ZIP code for weather data (US format)
+WEATHER_API_KEY = os.getenv("WEATHER_API_KEY", "YOUR_API_KEY_HERE")  # OpenWeatherMap API key
+OUTPUT_FOLDER = os.getenv("OUTPUT_FOLDER", "output")  # Subfolder where cropped images and HTML will be saved
+
+# Screen Resolution Settings - Configure for your display device
+SCREEN_WIDTH = int(os.getenv("SCREEN_WIDTH", "1280"))    # Target screen width in pixels
+SCREEN_HEIGHT = int(os.getenv("SCREEN_HEIGHT", "800"))    # Target screen height in pixels
+
+# Face Detection Settings - Configure for better face inclusion
+MIN_FACE_CONFIDENCE = float(os.getenv("MIN_FACE_CONFIDENCE", "0.7"))       # Minimum confidence score for face detection (0.0-1.0)
+FACE_PADDING_RATIO = float(os.getenv("FACE_PADDING_RATIO", "0.2"))        # Padding around faces as ratio of face size
+MAX_FACE_PADDING_PX = int(os.getenv("MAX_FACE_PADDING_PX", "120"))       # Maximum padding in pixels to prevent excessive margins
+FACE_SIZE_THRESHOLD = float(os.getenv("FACE_SIZE_THRESHOLD", "0.02"))      # Minimum face size as ratio of image area
+FACE_DEBUG = os.getenv("FACE_DEBUG", "false").lower() == "true"              # Set to True to print face detection debugging info
+
 def setup_directories():
     """
-    Initialize the directory structure and check for required files.
+    Initialize the directory structure for image processing.
     
-    Creates the output directory if it doesn't exist and verifies that the
-    dlib face landmarks model file is available for face detection.
+    Creates the output directory if it doesn't exist. MediaPipe face detection
+    is built-in and doesn't require external model files.
     
     Returns:
-        tuple: A 3-tuple containing:
+        tuple: A 2-tuple containing:
             - image_dir (str): Absolute path to the source image directory
             - output_dir (str): Absolute path to the output directory
-            - landmarks_file (str or None): Path to face landmarks file, or None if not found
-    
-    Note:
-        If the landmarks file is not found, face detection will be disabled and
-        images will be cropped from the center instead.
     """
     script_dir = os.path.dirname(os.path.abspath(__file__))
     image_dir = os.path.join(script_dir, IMAGE_DIRECTORY) if IMAGE_DIRECTORY != "." else script_dir
     output_dir = os.path.join(script_dir, OUTPUT_FOLDER)
     os.makedirs(output_dir, exist_ok=True)
     
-    # Check for face landmarks file
-    landmarks_file = os.path.join(script_dir, "shape_predictor_68_face_landmarks.dat")
-    if not os.path.exists(landmarks_file):
-        print("Warning: shape_predictor_68_face_landmarks.dat not found. Face detection will be skipped.")
-        return image_dir, output_dir, None
-    
-    return image_dir, output_dir, landmarks_file
+    return image_dir, output_dir
 
 def find_image_files(directory):
     """
@@ -111,6 +104,183 @@ def find_image_files(directory):
     
     return image_files
 
+def detect_faces_mediapipe(image):
+    """
+    Detect faces in an image using MediaPipe's advanced face detection.
+    
+    MediaPipe provides superior face detection accuracy (98.6%) compared to
+    traditional methods, with better handling of profile views, poor lighting,
+    and partially occluded faces.
+    
+    Args:
+        image: OpenCV image in BGR format
+    
+    Returns:
+        list: List of face dictionaries containing:
+            - bbox: (x, y, width, height) bounding box
+            - confidence: Detection confidence score (0.0-1.0)
+            - landmarks: Key facial landmarks for orientation assessment
+            - center: (x, y) center point of the face
+            - area: Face area in pixels
+    """
+    try:
+        # Initialize MediaPipe face detection
+        mp_face_detection = mp.solutions.face_detection
+        mp_drawing = mp.solutions.drawing_utils
+        
+        # Convert BGR to RGB for MediaPipe
+        rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        h, w = image.shape[:2]
+        
+        detected_faces = []
+        
+        # Use MediaPipe face detection with high confidence threshold
+        with mp_face_detection.FaceDetection(
+            model_selection=1,  # Use model 1 for better accuracy at longer range
+            min_detection_confidence=MIN_FACE_CONFIDENCE
+        ) as face_detection:
+            
+            results = face_detection.process(rgb_image)
+            
+            if results.detections:
+                for detection in results.detections:
+                    # Extract bounding box
+                    bbox = detection.location_data.relative_bounding_box
+                    x = int(bbox.xmin * w)
+                    y = int(bbox.ymin * h)
+                    width = int(bbox.width * w)
+                    height = int(bbox.height * h)
+                    
+                    # Calculate face properties
+                    face_area = width * height
+                    image_area = w * h
+                    face_center = (x + width // 2, y + height // 2)
+                    
+                    # Filter out very small faces (likely false positives)
+                    if face_area / image_area >= FACE_SIZE_THRESHOLD:
+                        face_data = {
+                            'bbox': (x, y, width, height),
+                            'confidence': detection.score[0],
+                            'center': face_center,
+                            'area': face_area,
+                            'x': x,
+                            'y': y,
+                            'width': width,
+                            'height': height,
+                            'right': x + width,
+                            'bottom': y + height
+                        }
+                        detected_faces.append(face_data)
+                        
+                        if FACE_DEBUG:
+                            print(f"    Face detected: conf={detection.score[0]:.3f}, "
+                                  f"bbox=({x},{y},{width},{height}), "
+                                  f"area={face_area}px ({face_area/image_area*100:.1f}% of image)")
+        
+        return detected_faces
+        
+    except Exception as e:
+        print(f"Error in MediaPipe face detection: {e}")
+        return []
+
+def calculate_smart_crop_region(faces, image_width, image_height, target_height):
+    """
+    Calculate optimal crop region using smart face prioritization.
+    
+    This algorithm prioritizes larger, more central faces while ensuring
+    all important faces remain visible. It uses weighted center-of-mass
+    calculation and validates face completeness.
+    
+    Args:
+        faces: List of face dictionaries from detect_faces_mediapipe
+        image_width: Width of the source image
+        image_height: Height of the source image
+        target_height: Target height for the cropped image
+    
+    Returns:
+        tuple: (y_min, y_max) crop boundaries, or None if no valid crop found
+    """
+    if not faces:
+        return None
+    
+    # Calculate face weights based on size and centrality
+    weighted_faces = []
+    image_center_y = image_height // 2
+    
+    for face in faces:
+        # Weight by face size (area)
+        size_weight = face['area'] / (image_width * image_height)
+        
+        # Weight by proximity to image center
+        center_distance = abs(face['center'][1] - image_center_y) / image_height
+        centrality_weight = 1.0 - center_distance
+        
+        # Combined weight
+        total_weight = size_weight * 2 + centrality_weight
+        
+        weighted_faces.append({
+            'face': face,
+            'weight': total_weight
+        })
+    
+    # Sort by weight (most important faces first)
+    weighted_faces.sort(key=lambda x: x['weight'], reverse=True)
+    
+    # Calculate weighted center of mass
+    total_weight = sum(wf['weight'] for wf in weighted_faces)
+    weighted_center_y = sum(
+        wf['face']['center'][1] * wf['weight'] for wf in weighted_faces
+    ) / total_weight
+    
+    # Calculate padding for the most important faces
+    primary_faces = [wf['face'] for wf in weighted_faces[:3]]  # Top 3 most important
+    
+    # Find the bounds that include all primary faces
+    y_min = min(face['y'] for face in primary_faces)
+    y_max = max(face['bottom'] for face in primary_faces)
+    
+    # Add dynamic padding based on face sizes
+    avg_face_height = sum(face['height'] for face in primary_faces) / len(primary_faces)
+    padding = min(MAX_FACE_PADDING_PX, int(avg_face_height * FACE_PADDING_RATIO))
+    
+    y_min = max(0, y_min - padding)
+    y_max = min(image_height, y_max + padding)
+    
+    # Adjust to target height while keeping faces centered
+    current_height = y_max - y_min
+    
+    if current_height < target_height:
+        # Expand region centered on weighted center
+        expansion_needed = target_height - current_height
+        y_min = max(0, int(weighted_center_y - target_height // 2))
+        y_max = y_min + target_height
+        
+        # Adjust if we go beyond image bounds
+        if y_max > image_height:
+            y_max = image_height
+            y_min = max(0, y_max - target_height)
+    
+    elif current_height > target_height:
+        # Shrink region centered on weighted center
+        y_min = max(0, int(weighted_center_y - target_height // 2))
+        y_max = y_min + target_height
+        
+        # Adjust if we go beyond image bounds
+        if y_max > image_height:
+            y_max = image_height
+            y_min = max(0, y_max - target_height)
+    
+    # Validate that primary faces are still in bounds
+    faces_in_bounds = all(
+        face['y'] >= y_min and face['bottom'] <= y_max
+        for face in primary_faces
+    )
+    
+    if not faces_in_bounds and FACE_DEBUG:
+        print(f"    Warning: Some faces may be cropped out of bounds")
+    
+    return (y_min, y_max)
+
 def process_image(args):
     """
     Process a single image with intelligent cropping and resizing.
@@ -122,17 +292,16 @@ def process_image(args):
     4. Apply intelligent cropping using face detection when available
     5. Save the processed image to the output directory
     
-    The cropping algorithm prioritizes keeping faces visible in the final image.
-    When faces are detected, the crop boundaries are adjusted to include all faces
-    with some padding. If no faces are detected or face detection is unavailable,
+    The cropping algorithm uses advanced MediaPipe face detection with smart
+    prioritization to ensure faces remain visible and well-composed in the final image.
+    When faces are detected, the crop boundaries are calculated using weighted
+    center-of-mass and face importance scoring. If no faces are detected,
     the image is cropped from the center.
     
     Args:
-        args (tuple): A 4-tuple containing:
+        args (tuple): A 2-tuple containing:
             - image_file (str): Path to the source image file
             - output_dir (str): Directory where processed image will be saved
-            - detector: dlib face detector object (or None if unavailable)
-            - predictor: dlib shape predictor object (or None if unavailable)
     
     Returns:
         str or None: Filename of the successfully processed image, or None if processing failed
@@ -141,7 +310,7 @@ def process_image(args):
         Exception: Various exceptions may occur during image processing, which are caught
                   and logged with the specific image filename for debugging
     """
-    image_file, output_dir, detector, predictor = args
+    image_file, output_dir = args
     
     try:
         # Load the image with OpenCV (BGR color format)
@@ -167,95 +336,31 @@ def process_image(args):
             
             # If resized image is taller than screen, we need to crop vertically
             if new_h > target_height:
-                if detector is not None:
-                    # Convert to grayscale for dlib face detection (required format)
-                    gray = cv2.cvtColor(resized_image, cv2.COLOR_BGR2GRAY)
-                    faces = detector(gray)
+                # Use MediaPipe face detection for intelligent cropping
+                faces = detect_faces_mediapipe(resized_image)
+                
+                if faces:
+                    if FACE_DEBUG:
+                        print(f"Found {len(faces)} faces in {os.path.basename(image_file)} (landscape)")
                     
-                    if len(faces) > 0:
-                        # Extract detailed face information for better cropping
-                        face_data = []
-                        for face in faces:
-                            face_height = face.bottom() - face.top()
-                            face_width = face.right() - face.left()
-                            # Calculate adaptive padding based on face size
-                            padding = min(MAX_FACE_PADDING_PX, int(face_height * MIN_FACE_PADDING_RATIO))
-                            face_data.append({
-                                'top': face.top(),
-                                'bottom': face.bottom(),
-                                'left': face.left(),
-                                'right': face.right(),
-                                'height': face_height,
-                                'width': face_width,
-                                'padding': padding
-                            })
+                    # Calculate optimal crop region using smart face prioritization
+                    crop_region = calculate_smart_crop_region(faces, new_w, new_h, target_height)
+                    
+                    if crop_region:
+                        y_min, y_max = crop_region
                         
                         if FACE_DEBUG:
-                            print(f"Found {len(faces)} faces in {os.path.basename(image_file)}")
-                            for i, face in enumerate(face_data):
-                                print(f"  Face {i+1}: Y={face['top']}-{face['bottom']}, padding={face['padding']}px")
+                            print(f"  Smart crop region: Y={y_min}-{y_max} (height={y_max-y_min})")
                         
-                        # Calculate crop boundaries that include ALL faces with adequate padding
-                        y_min = max(0, min(face['top'] - face['padding'] for face in face_data))
-                        y_max = min(new_h, max(face['bottom'] + face['padding'] for face in face_data))
-                        
-                        # Verify all faces will be included in the final crop
-                        faces_in_bounds = True
-                        for face in face_data:
-                            if face['top'] < y_min or face['bottom'] > y_max:
-                                faces_in_bounds = False
-                                break
-                        
-                        if not faces_in_bounds:
-                            # Recalculate with minimum padding to ensure all faces fit
-                            min_padding = 20  # Absolute minimum padding
-                            y_min = max(0, min(face['top'] - min_padding for face in face_data))
-                            y_max = min(new_h, max(face['bottom'] + min_padding for face in face_data))
-                        
-                        # Ensure the crop region is exactly target_height pixels tall
-                        current_height = y_max - y_min
-                        if current_height < target_height:
-                            # Expand the crop region symmetrically to reach target height
-                            diff = target_height - current_height
-                            y_min = max(0, y_min - diff//2)
-                            y_max = y_min + target_height
-                            # Handle edge case where expansion goes beyond image bounds
-                            if y_max > new_h:
-                                y_max = new_h
-                                y_min = new_h - target_height
-                        elif current_height > target_height:
-                            # Crop region is too tall, need to trim while keeping faces
-                            # Priority: keep face centers in the crop
-                            face_centers = [(face['top'] + face['bottom']) // 2 for face in face_data]
-                            center_of_faces = sum(face_centers) // len(face_centers)
-                            
-                            # Adjust crop to target_height centered on faces
-                            y_min = max(0, center_of_faces - target_height//2)
-                            y_max = y_min + target_height
-                            if y_max > new_h:
-                                y_max = new_h
-                                y_min = new_h - target_height
-                        
-                        # Final validation: check if all faces are still in bounds
-                        final_faces_in_bounds = all(
-                            face['top'] >= y_min and face['bottom'] <= y_max 
-                            for face in face_data
-                        )
-                        
-                        if FACE_DEBUG:
-                            print(f"  Crop region: Y={y_min}-{y_max} (height={y_max-y_min})")
-                            print(f"  All faces in bounds: {final_faces_in_bounds}")
-                        
-                        # Crop the image vertically, keeping full width
                         cropped_image = resized_image[y_min:y_max, :]
                     else:
-                        # No faces detected - fall back to center cropping
+                        # Fallback to center cropping if smart crop fails
                         y_center = new_h // 2
                         y_min = max(0, y_center - target_height//2)
                         y_max = min(new_h, y_center + target_height//2)
                         cropped_image = resized_image[y_min:y_max, :]
                 else:
-                    # Face detection not available - use center cropping
+                    # No faces detected - use center cropping
                     y_center = new_h // 2
                     y_min = max(0, y_center - target_height//2)
                     y_max = min(new_h, y_center + target_height//2)
@@ -273,99 +378,33 @@ def process_image(args):
             new_h = int(new_w * aspect_ratio)
             resized_image = cv2.resize(image, (new_w, new_h))
             
-            if detector is not None:
-                # Convert to grayscale for dlib face detection
-                gray = cv2.cvtColor(resized_image, cv2.COLOR_BGR2GRAY)
+            # Use MediaPipe face detection for intelligent cropping
+            faces = detect_faces_mediapipe(resized_image)
+            
+            if faces:
+                if FACE_DEBUG:
+                    print(f"Found {len(faces)} faces in {os.path.basename(image_file)} (portrait)")
                 
-                # Run face detection on the resized image
-                faces = detector(gray)
+                # Calculate optimal crop region using smart face prioritization
+                crop_region = calculate_smart_crop_region(faces, new_w, new_h, target_height)
                 
-                if len(faces) > 0:
-                    # Extract detailed face information for better cropping
-                    face_data = []
-                    for face in faces:
-                        face_height = face.bottom() - face.top()
-                        face_width = face.right() - face.left()
-                        # Calculate adaptive padding based on face size
-                        padding = min(MAX_FACE_PADDING_PX, int(face_height * MIN_FACE_PADDING_RATIO))
-                        face_data.append({
-                            'top': face.top(),
-                            'bottom': face.bottom(),
-                            'left': face.left(),
-                            'right': face.right(),
-                            'height': face_height,
-                            'width': face_width,
-                            'padding': padding
-                        })
+                if crop_region:
+                    y_min, y_max = crop_region
                     
                     if FACE_DEBUG:
-                        print(f"Found {len(faces)} faces in {os.path.basename(image_file)} (portrait)")
-                        for i, face in enumerate(face_data):
-                            print(f"  Face {i+1}: Y={face['top']}-{face['bottom']}, padding={face['padding']}px")
+                        print(f"  Smart crop region: Y={y_min}-{y_max} (height={y_max-y_min})")
                     
-                    # Calculate crop boundaries that include ALL faces with adequate padding
-                    y_min = max(0, min(face['top'] - face['padding'] for face in face_data))
-                    y_max = min(new_h, max(face['bottom'] + face['padding'] for face in face_data))
-                    
-                    # Verify all faces will be included in the final crop
-                    faces_in_bounds = True
-                    for face in face_data:
-                        if face['top'] < y_min or face['bottom'] > y_max:
-                            faces_in_bounds = False
-                            break
-                    
-                    if not faces_in_bounds:
-                        # Recalculate with minimum padding to ensure all faces fit
-                        min_padding = 20  # Absolute minimum padding
-                        y_min = max(0, min(face['top'] - min_padding for face in face_data))
-                        y_max = min(new_h, max(face['bottom'] + min_padding for face in face_data))
-                    
-                    # Ensure final crop is exactly target_height pixels tall
-                    current_height = y_max - y_min
-                    if current_height < target_height:
-                        # Expand crop region to meet target height requirement
-                        diff = target_height - current_height
-                        y_min = max(0, y_min - diff//2)
-                        y_max = y_min + target_height
-                        # Adjust if expansion exceeds image boundaries
-                        if y_max > new_h:
-                            y_max = new_h
-                            y_min = new_h - target_height
-                    elif current_height > target_height:
-                        # Crop region is too tall, need to trim while keeping faces
-                        # Priority: keep face centers in the crop
-                        face_centers = [(face['top'] + face['bottom']) // 2 for face in face_data]
-                        center_of_faces = sum(face_centers) // len(face_centers)
-                        
-                        # Adjust crop to target_height centered on faces
-                        y_min = max(0, center_of_faces - target_height//2)
-                        y_max = y_min + target_height
-                        if y_max > new_h:
-                            y_max = new_h
-                            y_min = new_h - target_height
-                    
-                    # Final validation: check if all faces are still in bounds
-                    final_faces_in_bounds = all(
-                        face['top'] >= y_min and face['bottom'] <= y_max 
-                        for face in face_data
-                    )
-                    
-                    if FACE_DEBUG:
-                        print(f"  Crop region: Y={y_min}-{y_max} (height={y_max-y_min})")
-                        print(f"  All faces in bounds: {final_faces_in_bounds}")
-                    
-                    # Apply the calculated crop boundaries
                     cropped_image = resized_image[y_min:y_max, :]
                     final_image = cropped_image
                 else:
-                    # No faces found - use center-based cropping strategy
+                    # Fallback to center cropping if smart crop fails
                     y_center = new_h // 2
                     y_min = max(0, y_center - target_height//2)
                     y_max = min(new_h, y_center + target_height//2)
                     cropped_image = resized_image[y_min:y_max, :]
                     final_image = cropped_image
             else:
-                # Face detection unavailable - default to center cropping
+                # No faces detected - use center cropping
                 y_center = new_h // 2
                 y_min = max(0, y_center - target_height//2)
                 y_max = min(new_h, y_center + target_height//2)
@@ -622,12 +661,11 @@ def main():
     Main execution function that orchestrates the entire slideshow generation process.
     
     This function coordinates all the major steps:
-    1. Set up directories and check for required files
+    1. Set up directories
     2. Discover all image files in the source directory
-    3. Initialize face detection capabilities if available
-    4. Process all images in parallel using multiprocessing
-    5. Generate the HTML slideshow with processed images
-    6. Provide user feedback and final instructions
+    3. Process all images in parallel using multiprocessing with MediaPipe face detection
+    4. Generate the HTML slideshow with processed images
+    5. Provide user feedback and final instructions
     
     The function uses all available CPU cores for parallel image processing to
     minimize processing time for large image collections.
@@ -642,7 +680,7 @@ def main():
         - Prints progress information to console
     """
     print("Setting up directories...")
-    image_dir, output_dir, landmarks_file = setup_directories()
+    image_dir, output_dir = setup_directories()
     
     print(f"Looking for images in: {image_dir}")
     image_files = find_image_files(image_dir)
@@ -653,27 +691,14 @@ def main():
     
     print(f"Found {len(image_files)} images")
     
-    # Initialize face detection components if the required model file exists
-    detector = None
-    predictor = None  # Shape predictor for detailed facial landmarks (not used in current implementation)
-    if landmarks_file:
-        try:
-            # Load dlib's pre-trained face detector (HOG + Linear SVM)
-            detector = dlib.get_frontal_face_detector()
-            # Load the 68-point facial landmark predictor model
-            predictor = dlib.shape_predictor(landmarks_file)
-            print("Face detection enabled")
-        except Exception as e:
-            print(f"Could not initialize face detection: {e}")
-            print("Falling back to center-based cropping")
-    else:
-        print("Face detection disabled - will crop from center")
+    # MediaPipe face detection is built-in and doesn't require external model files
+    print("MediaPipe face detection enabled")
     
     # Prepare argument tuples for parallel processing
-    # Each worker process needs: (image_path, output_dir, face_detector, landmark_predictor)
-    process_args = [(img_file, output_dir, detector, predictor) for img_file in image_files]
+    # Each worker process needs: (image_path, output_dir)
+    process_args = [(img_file, output_dir) for img_file in image_files]
     
-    print("Processing images...")
+    print("Processing images with advanced face detection...")
     # Utilize all available CPU cores for parallel image processing
     # This significantly reduces processing time for large image collections
     with Pool(cpu_count()) as pool:

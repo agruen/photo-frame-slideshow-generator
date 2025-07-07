@@ -1,0 +1,28 @@
+services:
+  photo-slideshow:
+    build: .
+    container_name: photo-slideshow-generator
+    volumes:
+      # Mount your photos directory
+      - ./photos:/app/input:ro
+      # Mount output directory to get processed images and HTML
+      - ./output:/app/output
+    environment:
+      # Display Settings
+      - SCREEN_WIDTH=1280
+      - SCREEN_HEIGHT=800
+      
+      # Weather Settings - EDIT THESE
+      - ZIP_CODE=10001
+      - WEATHER_API_KEY=YOUR_API_KEY_HERE
+      
+      # Face Detection Settings
+      - MIN_FACE_CONFIDENCE=0.7
+      - FACE_PADDING_RATIO=0.2
+      - MAX_FACE_PADDING_PX=120
+      - FACE_SIZE_THRESHOLD=0.02
+      - FACE_DEBUG=true
+      
+      # Directory Settings
+      - IMAGE_DIRECTORY=/app/input
+      - OUTPUT_FOLDER=/app/output
