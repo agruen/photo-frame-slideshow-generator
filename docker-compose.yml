@@ -16,12 +16,16 @@ services:
       - ZIP_CODE=10001
       - WEATHER_API_KEY=YOUR_API_KEY_HERE
       
-      # Face Detection Settings
+      # Face Detection Settings (more conservative to prevent cutoffs)
       - MIN_FACE_CONFIDENCE=0.7
-      - FACE_PADDING_RATIO=0.2
-      - MAX_FACE_PADDING_PX=120
+      - FACE_PADDING_RATIO=0.3
+      - MAX_FACE_PADDING_PX=200
       - FACE_SIZE_THRESHOLD=0.02
       - FACE_DEBUG=true
+      
+      # Portrait-Aware Cropping Settings
+      - PORTRAIT_FACE_WEIGHT=0.8
+      - PORTRAIT_UPPER_BIAS=0.2
       
       # Directory Settings
       - IMAGE_DIRECTORY=/app/input

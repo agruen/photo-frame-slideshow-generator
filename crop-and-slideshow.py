@@ -34,12 +34,13 @@ containing the processed images and slideshow HTML file.
 """
 
 import cv2
-import mediapipe as mp
 import numpy as np
 import os
 import json
 from glob import glob
 from multiprocessing import Pool, cpu_count
+from retinaface import RetinaFace
+from ultralytics import YOLO
 
 # Configuration - Edit these settings as needed or use environment variables
 IMAGE_DIRECTORY = os.getenv("IMAGE_DIRECTORY", ".")  # Directory containing source images
@@ -57,6 +58,10 @@ FACE_PADDING_RATIO = float(os.getenv("FACE_PADDING_RATIO", "0.2"))        # Padd
 MAX_FACE_PADDING_PX = int(os.getenv("MAX_FACE_PADDING_PX", "120"))       # Maximum padding in pixels to prevent excessive margins
 FACE_SIZE_THRESHOLD = float(os.getenv("FACE_SIZE_THRESHOLD", "0.02"))      # Minimum face size as ratio of image area
 FACE_DEBUG = os.getenv("FACE_DEBUG", "false").lower() == "true"              # Set to True to print face detection debugging info
+
+# Portrait-specific cropping settings
+PORTRAIT_FACE_WEIGHT = float(os.getenv("PORTRAIT_FACE_WEIGHT", "0.7"))      # Weight for face position in portrait cropping (0.0-1.0)
+PORTRAIT_UPPER_BIAS = float(os.getenv("PORTRAIT_UPPER_BIAS", "0.3"))       # Bias toward upper portion of portrait (0.0-1.0)
 
 def setup_directories():
     """
@@ -93,9 +98,8 @@ def find_image_files(directory):
     Supported formats:
         - JPEG (.jpg, .jpeg)
         - PNG (.png)
-        - GIF (.gif)
     """
-    image_extensions = ['jpg', 'jpeg', 'png', 'gif']
+    image_extensions = ['jpg', 'jpeg', 'png']  # Removed GIF - causes issues with face detection
     image_files = []
     
     for ext in image_extensions:
@@ -104,13 +108,87 @@ def find_image_files(directory):
     
     return image_files
 
-def detect_faces_mediapipe(image):
+def detect_people_yolo(image):
     """
-    Detect faces in an image using MediaPipe's advanced face detection.
+    Detect people in an image using YOLO when face detection fails.
     
-    MediaPipe provides superior face detection accuracy (98.6%) compared to
-    traditional methods, with better handling of profile views, poor lighting,
-    and partially occluded faces.
+    YOLO person detection is used as a fallback when RetinaFace doesn't
+    find faces. This ensures we can still crop intelligently around people
+    even if their faces aren't clearly visible or detectable.
+    
+    Args:
+        image: OpenCV image in BGR format
+    
+    Returns:
+        list: List of person dictionaries containing:
+            - bbox: (x, y, width, height) bounding box
+            - confidence: Detection confidence score (0.0-1.0)
+            - center: (x, y) center point of the person
+            - area: Person area in pixels
+    """
+    try:
+        h, w = image.shape[:2]
+        image_area = w * h
+        detected_people = []
+        
+        # Initialize YOLO model (downloads automatically on first use)
+        model = YOLO('yolov8n.pt')  # Nano model for speed
+        
+        # Run YOLO detection
+        results = model(image, classes=[0], verbose=False)  # Class 0 = person
+        
+        for result in results:
+            boxes = result.boxes
+            if boxes is not None:
+                for box in boxes:
+                    # Get bounding box coordinates
+                    x1, y1, x2, y2 = map(int, box.xyxy[0])
+                    confidence = float(box.conf[0])
+                    
+                    # Filter by confidence
+                    if confidence >= MIN_FACE_CONFIDENCE:
+                        # Calculate dimensions
+                        x, y = x1, y1
+                        width = x2 - x1
+                        height = y2 - y1
+                        person_area = width * height
+                        person_center = (x + width // 2, y + height // 2)
+                        
+                        # Filter by size (avoid tiny detections)
+                        if person_area / image_area >= FACE_SIZE_THRESHOLD:
+                            person_dict = {
+                                'bbox': (x, y, width, height),
+                                'confidence': confidence,
+                                'center': person_center,
+                                'area': person_area,
+                                'x': x,
+                                'y': y,
+                                'width': width,
+                                'height': height,
+                                'right': x2,
+                                'bottom': y2,
+                                'type': 'person'  # Mark as person detection
+                            }
+                            detected_people.append(person_dict)
+                            
+                            if FACE_DEBUG:
+                                print(f"    Person detected: conf={confidence:.3f}, "
+                                      f"bbox=({x},{y},{width},{height}), "
+                                      f"area={person_area}px ({person_area/image_area*100:.1f}% of image)")
+        
+        return detected_people
+        
+    except Exception as e:
+        print(f"Error in YOLO person detection: {e}")
+        return []
+
+def detect_faces_retinaface(image):
+    """
+    Detect faces in an image using RetinaFace's state-of-the-art face detection.
+    
+    RetinaFace provides superior face detection accuracy (91.4% AP on WIDER FACE)
+    with excellent handling of profile views, poor lighting, partial occlusion,
+    and multiple faces. Particularly effective for portrait photography.
     
     Args:
         image: OpenCV image in BGR format
@@ -119,83 +197,80 @@ def detect_faces_mediapipe(image):
         list: List of face dictionaries containing:
             - bbox: (x, y, width, height) bounding box
             - confidence: Detection confidence score (0.0-1.0)
-            - landmarks: Key facial landmarks for orientation assessment
+            - landmarks: 5-point facial landmarks (eyes, nose, mouth)
             - center: (x, y) center point of the face
             - area: Face area in pixels
     """
     try:
-        # Initialize MediaPipe face detection
-        mp_face_detection = mp.solutions.face_detection
-        mp_drawing = mp.solutions.drawing_utils
-        
-        # Convert BGR to RGB for MediaPipe
-        rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         h, w = image.shape[:2]
-        
+        image_area = w * h
         detected_faces = []
         
-        # Use MediaPipe face detection with high confidence threshold
-        with mp_face_detection.FaceDetection(
-            model_selection=1,  # Use model 1 for better accuracy at longer range
-            min_detection_confidence=MIN_FACE_CONFIDENCE
-        ) as face_detection:
-            
-            results = face_detection.process(rgb_image)
-            
-            if results.detections:
-                for detection in results.detections:
-                    # Extract bounding box
-                    bbox = detection.location_data.relative_bounding_box
-                    x = int(bbox.xmin * w)
-                    y = int(bbox.ymin * h)
-                    width = int(bbox.width * w)
-                    height = int(bbox.height * h)
+        # Use RetinaFace for detection - it expects RGB format
+        rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        
+        # RetinaFace detection with threshold
+        faces = RetinaFace.detect_faces(rgb_image, threshold=MIN_FACE_CONFIDENCE)
+        
+        if faces:
+            for face_key, face_data in faces.items():
+                # Extract bounding box coordinates
+                facial_area = face_data['facial_area']
+                x, y, right, bottom = facial_area
+                
+                # Calculate width and height
+                width = right - x
+                height = bottom - y
+                
+                # Calculate face properties
+                face_area = width * height
+                face_center = (x + width // 2, y + height // 2)
+                
+                # Get confidence score
+                confidence = face_data['score']
+                
+                # Filter out very small faces (likely false positives)
+                if face_area / image_area >= FACE_SIZE_THRESHOLD:
+                    face_dict = {
+                        'bbox': (x, y, width, height),
+                        'confidence': confidence,
+                        'center': face_center,
+                        'area': face_area,
+                        'x': x,
+                        'y': y,
+                        'width': width,
+                        'height': height,
+                        'right': right,
+                        'bottom': bottom,
+                        'landmarks': face_data['landmarks']  # 5-point landmarks
+                    }
+                    detected_faces.append(face_dict)
                     
-                    # Calculate face properties
-                    face_area = width * height
-                    image_area = w * h
-                    face_center = (x + width // 2, y + height // 2)
-                    
-                    # Filter out very small faces (likely false positives)
-                    if face_area / image_area >= FACE_SIZE_THRESHOLD:
-                        face_data = {
-                            'bbox': (x, y, width, height),
-                            'confidence': detection.score[0],
-                            'center': face_center,
-                            'area': face_area,
-                            'x': x,
-                            'y': y,
-                            'width': width,
-                            'height': height,
-                            'right': x + width,
-                            'bottom': y + height
-                        }
-                        detected_faces.append(face_data)
-                        
-                        if FACE_DEBUG:
-                            print(f"    Face detected: conf={detection.score[0]:.3f}, "
-                                  f"bbox=({x},{y},{width},{height}), "
-                                  f"area={face_area}px ({face_area/image_area*100:.1f}% of image)")
+                    if FACE_DEBUG:
+                        print(f"    Face detected: conf={confidence:.3f}, "
+                              f"bbox=({x},{y},{width},{height}), "
+                              f"area={face_area}px ({face_area/image_area*100:.1f}% of image)")
         
         return detected_faces
         
     except Exception as e:
-        print(f"Error in MediaPipe face detection: {e}")
+        print(f"Error in RetinaFace detection: {e}")
         return []
 
-def calculate_smart_crop_region(faces, image_width, image_height, target_height):
+def calculate_portrait_aware_crop_region(faces, image_width, image_height, target_height, is_portrait=True):
     """
-    Calculate optimal crop region using smart face prioritization.
+    Calculate optimal crop region with portrait-aware composition rules.
     
-    This algorithm prioritizes larger, more central faces while ensuring
-    all important faces remain visible. It uses weighted center-of-mass
-    calculation and validates face completeness.
+    This advanced algorithm is specifically designed for portrait→landscape cropping.
+    It uses composition rules (rule of thirds), face quality assessment, and
+    portrait-specific weighting to ensure natural, aesthetically pleasing crops.
     
     Args:
-        faces: List of face dictionaries from detect_faces_mediapipe
+        faces: List of face dictionaries from detect_faces_retinaface
         image_width: Width of the source image
         image_height: Height of the source image
         target_height: Target height for the cropped image
+        is_portrait: True if source image is portrait orientation
     
     Returns:
         tuple: (y_min, y_max) crop boundaries, or None if no valid crop found
@@ -203,81 +278,210 @@ def calculate_smart_crop_region(faces, image_width, image_height, target_height)
     if not faces:
         return None
     
-    # Calculate face weights based on size and centrality
-    weighted_faces = []
-    image_center_y = image_height // 2
-    
-    for face in faces:
-        # Weight by face size (area)
-        size_weight = face['area'] / (image_width * image_height)
+    # Portrait-specific composition analysis
+    if is_portrait:
+        # For portraits, faces are typically in upper 1/3 to 1/2 of image
+        upper_third = image_height // 3
+        composition_center = int(image_height * 0.4)  # 40% down from top
         
-        # Weight by proximity to image center
-        center_distance = abs(face['center'][1] - image_center_y) / image_height
-        centrality_weight = 1.0 - center_distance
+        # Apply portrait-specific face weighting
+        weighted_faces = []
+        for face in faces:
+            # Face quality assessment using landmarks (if available)
+            face_quality = 1.0
+            if 'landmarks' in face:
+                # Assess face completeness and clarity
+                landmarks = face['landmarks']
+                if len(landmarks) >= 5:
+                    # Calculate face symmetry and completeness
+                    eye_distance = abs(landmarks['left_eye'][0] - landmarks['right_eye'][0])
+                    face_quality = min(1.0, eye_distance / (face['width'] * 0.3))
+            
+            # Weight by face size (larger faces are more important)
+            size_weight = face['area'] / (image_width * image_height)
+            
+            # Weight by position - favor upper portion for portraits
+            y_position_ratio = face['center'][1] / image_height
+            if y_position_ratio <= 0.5:  # Upper half gets bonus
+                position_weight = 1.0 - (y_position_ratio * PORTRAIT_UPPER_BIAS)
+            else:
+                position_weight = 0.5 - ((y_position_ratio - 0.5) * 0.8)
+            
+            # Weight by proximity to portrait composition center
+            center_distance = abs(face['center'][1] - composition_center) / image_height
+            composition_weight = 1.0 - center_distance
+            
+            # Combined weight with portrait-specific emphasis
+            total_weight = (size_weight * 2.0 + 
+                          position_weight * PORTRAIT_FACE_WEIGHT + 
+                          composition_weight * 1.5 + 
+                          face_quality * 0.5)
+            
+            weighted_faces.append({
+                'face': face,
+                'weight': total_weight,
+                'quality': face_quality
+            })
+    else:
+        # Landscape images use traditional center-weighted approach
+        weighted_faces = []
+        image_center_y = image_height // 2
         
-        # Combined weight
-        total_weight = size_weight * 2 + centrality_weight
-        
-        weighted_faces.append({
-            'face': face,
-            'weight': total_weight
-        })
+        for face in faces:
+            size_weight = face['area'] / (image_width * image_height)
+            center_distance = abs(face['center'][1] - image_center_y) / image_height
+            centrality_weight = 1.0 - center_distance
+            total_weight = size_weight * 2 + centrality_weight
+            
+            weighted_faces.append({
+                'face': face,
+                'weight': total_weight,
+                'quality': 1.0
+            })
     
     # Sort by weight (most important faces first)
     weighted_faces.sort(key=lambda x: x['weight'], reverse=True)
     
-    # Calculate weighted center of mass
+    # Calculate weighted center of mass with portrait bias
     total_weight = sum(wf['weight'] for wf in weighted_faces)
     weighted_center_y = sum(
         wf['face']['center'][1] * wf['weight'] for wf in weighted_faces
     ) / total_weight
     
-    # Calculate padding for the most important faces
-    primary_faces = [wf['face'] for wf in weighted_faces[:3]]  # Top 3 most important
+    # Select primary faces (top 3 most important)
+    primary_faces = [wf['face'] for wf in weighted_faces[:3]]
     
-    # Find the bounds that include all primary faces
+    # Find bounds that include all primary faces
     y_min = min(face['y'] for face in primary_faces)
     y_max = max(face['bottom'] for face in primary_faces)
     
-    # Add dynamic padding based on face sizes
+    # Calculate adaptive padding based on face characteristics
     avg_face_height = sum(face['height'] for face in primary_faces) / len(primary_faces)
-    padding = min(MAX_FACE_PADDING_PX, int(avg_face_height * FACE_PADDING_RATIO))
+    base_padding = min(MAX_FACE_PADDING_PX, int(avg_face_height * FACE_PADDING_RATIO))
     
-    y_min = max(0, y_min - padding)
-    y_max = min(image_height, y_max + padding)
+    # Apply portrait-specific padding adjustments
+    if is_portrait:
+        # More padding below faces in portraits (for shoulders/body)
+        top_padding = int(base_padding * 0.8)
+        bottom_padding = int(base_padding * 1.2)
+    else:
+        # Equal padding for landscape
+        top_padding = bottom_padding = base_padding
     
-    # Adjust to target height while keeping faces centered
+    y_min = max(0, y_min - top_padding)
+    y_max = min(image_height, y_max + bottom_padding)
+    
+    # Adjust to target height using composition-aware centering
     current_height = y_max - y_min
     
     if current_height < target_height:
-        # Expand region centered on weighted center
-        expansion_needed = target_height - current_height
-        y_min = max(0, int(weighted_center_y - target_height // 2))
-        y_max = y_min + target_height
-        
-        # Adjust if we go beyond image bounds
-        if y_max > image_height:
-            y_max = image_height
-            y_min = max(0, y_max - target_height)
+        # Expand region with portrait-aware centering
+        if is_portrait:
+            # For portraits, bias toward upper portion
+            expansion_needed = target_height - current_height
+            upper_expansion = int(expansion_needed * 0.4)
+            lower_expansion = expansion_needed - upper_expansion
+            
+            y_min = max(0, y_min - upper_expansion)
+            y_max = min(image_height, y_max + lower_expansion)
+            
+            # Adjust if we hit bounds
+            if y_max - y_min < target_height:
+                if y_max == image_height:
+                    y_min = max(0, y_max - target_height)
+                elif y_min == 0:
+                    y_max = min(image_height, y_min + target_height)
+        else:
+            # Standard center expansion for landscape
+            y_min = max(0, int(weighted_center_y - target_height // 2))
+            y_max = y_min + target_height
+            
+            if y_max > image_height:
+                y_max = image_height
+                y_min = max(0, y_max - target_height)
     
     elif current_height > target_height:
-        # Shrink region centered on weighted center
-        y_min = max(0, int(weighted_center_y - target_height // 2))
-        y_max = y_min + target_height
-        
-        # Adjust if we go beyond image bounds
-        if y_max > image_height:
-            y_max = image_height
-            y_min = max(0, y_max - target_height)
+        # Shrink region with portrait-aware centering
+        if is_portrait:
+            # For portraits, prefer keeping upper portion
+            y_max = min(image_height, y_min + target_height)
+            if y_max == image_height:
+                y_min = max(0, y_max - target_height)
+        else:
+            # Standard center shrinking for landscape
+            y_min = max(0, int(weighted_center_y - target_height // 2))
+            y_max = y_min + target_height
+            
+            if y_max > image_height:
+                y_max = image_height
+                y_min = max(0, y_max - target_height)
     
-    # Validate that primary faces are still in bounds
-    faces_in_bounds = all(
+    # CRITICAL: Validate and fix face boundaries to prevent cutoffs
+    face_y_min = min(face['y'] for face in primary_faces)
+    face_y_max = max(face['bottom'] for face in primary_faces)
+    
+    # Check if any faces would be cut off
+    faces_in_bounds = (face_y_min >= y_min and face_y_max <= y_max)
+    
+    if not faces_in_bounds:
+        if FACE_DEBUG:
+            print(f"    FIXING: Faces would be cut off! Adjusting crop bounds...")
+            print(f"    Original crop: Y={y_min}-{y_max}, Face bounds: Y={face_y_min}-{face_y_max}")
+        
+        # Ensure all faces fit within target height
+        required_height = face_y_max - face_y_min
+        if required_height <= target_height:
+            # Add generous padding around faces
+            face_padding = min(MAX_FACE_PADDING_PX, int((target_height - required_height) * 0.4))
+            
+            # Start with face bounds plus padding
+            y_min = max(0, face_y_min - face_padding)
+            y_max = min(image_height, face_y_max + face_padding)
+            
+            # Adjust to exact target height
+            current_height = y_max - y_min
+            if current_height < target_height:
+                # Need to expand
+                expansion_needed = target_height - current_height
+                if is_portrait:
+                    # For portraits, expand more downward (for body)
+                    expand_up = min(expansion_needed // 3, y_min)
+                    expand_down = expansion_needed - expand_up
+                    y_min = max(0, y_min - expand_up)
+                    y_max = min(image_height, y_max + expand_down)
+                else:
+                    # For landscape, expand equally
+                    expand_each = expansion_needed // 2
+                    y_min = max(0, y_min - expand_each)
+                    y_max = min(image_height, y_max + expand_each)
+            
+            # Final adjustment if we hit image bounds
+            if y_max - y_min < target_height:
+                if y_max == image_height:
+                    y_min = max(0, y_max - target_height)
+                elif y_min == 0:
+                    y_max = min(image_height, y_min + target_height)
+            
+            if FACE_DEBUG:
+                print(f"    FIXED crop: Y={y_min}-{y_max} (height={y_max-y_min})")
+        else:
+            if FACE_DEBUG:
+                print(f"    WARNING: Faces too tall ({required_height}px) for target height ({target_height}px)")
+            # Faces are too tall - crop from top of highest face
+            y_min = face_y_min
+            y_max = min(image_height, y_min + target_height)
+    
+    # Final validation
+    final_faces_in_bounds = all(
         face['y'] >= y_min and face['bottom'] <= y_max
         for face in primary_faces
     )
     
-    if not faces_in_bounds and FACE_DEBUG:
-        print(f"    Warning: Some faces may be cropped out of bounds")
+    if not final_faces_in_bounds and FACE_DEBUG:
+        print(f"    ERROR: Still cutting off faces after adjustment!")
+        for i, face in enumerate(primary_faces):
+            in_bounds = face['y'] >= y_min and face['bottom'] <= y_max
+            print(f"      Face {i+1}: Y={face['y']}-{face['bottom']}, In bounds: {in_bounds}")
     
     return (y_min, y_max)
 
@@ -332,84 +536,168 @@ def process_image(args):
             aspect_ratio = h / w
             new_w = target_width
             new_h = int(new_w * aspect_ratio)
-            resized_image = cv2.resize(image, (new_w, new_h))
+            # Use INTER_LANCZOS4 for better quality resize
+            resized_image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
             
             # If resized image is taller than screen, we need to crop vertically
             if new_h > target_height:
-                # Use MediaPipe face detection for intelligent cropping
-                faces = detect_faces_mediapipe(resized_image)
+                # Try RetinaFace first for face detection
+                faces = detect_faces_retinaface(resized_image)
                 
                 if faces:
                     if FACE_DEBUG:
                         print(f"Found {len(faces)} faces in {os.path.basename(image_file)} (landscape)")
                     
-                    # Calculate optimal crop region using smart face prioritization
-                    crop_region = calculate_smart_crop_region(faces, new_w, new_h, target_height)
+                    # Calculate optimal crop region using portrait-aware algorithm
+                    crop_region = calculate_portrait_aware_crop_region(faces, new_w, new_h, target_height, is_portrait=False)
                     
                     if crop_region:
                         y_min, y_max = crop_region
                         
                         if FACE_DEBUG:
-                            print(f"  Smart crop region: Y={y_min}-{y_max} (height={y_max-y_min})")
+                            print(f"  Face-based crop region: Y={y_min}-{y_max} (height={y_max-y_min})")
                         
                         cropped_image = resized_image[y_min:y_max, :]
                     else:
-                        # Fallback to center cropping if smart crop fails
+                        # Face detection found faces but crop failed - try person detection
+                        people = detect_people_yolo(resized_image)
+                        if people:
+                            if FACE_DEBUG:
+                                print(f"  Face crop failed, found {len(people)} people (landscape)")
+                            crop_region = calculate_portrait_aware_crop_region(people, new_w, new_h, target_height, is_portrait=False)
+                            if crop_region:
+                                y_min, y_max = crop_region
+                                if FACE_DEBUG:
+                                    print(f"  Person-based crop region: Y={y_min}-{y_max} (height={y_max-y_min})")
+                                cropped_image = resized_image[y_min:y_max, :]
+                            else:
+                                # Both failed - center crop
+                                y_center = new_h // 2
+                                y_min = max(0, y_center - target_height//2)
+                                y_max = min(new_h, y_center + target_height//2)
+                                cropped_image = resized_image[y_min:y_max, :]
+                        else:
+                            # Center crop fallback
+                            y_center = new_h // 2
+                            y_min = max(0, y_center - target_height//2)
+                            y_max = min(new_h, y_center + target_height//2)
+                            cropped_image = resized_image[y_min:y_max, :]
+                else:
+                    # No faces detected - try person detection
+                    people = detect_people_yolo(resized_image)
+                    if people:
+                        if FACE_DEBUG:
+                            print(f"No faces found, detected {len(people)} people in {os.path.basename(image_file)} (landscape)")
+                        
+                        crop_region = calculate_portrait_aware_crop_region(people, new_w, new_h, target_height, is_portrait=False)
+                        if crop_region:
+                            y_min, y_max = crop_region
+                            if FACE_DEBUG:
+                                print(f"  Person-based crop region: Y={y_min}-{y_max} (height={y_max-y_min})")
+                            cropped_image = resized_image[y_min:y_max, :]
+                        else:
+                            # Person detection failed - center crop
+                            y_center = new_h // 2
+                            y_min = max(0, y_center - target_height//2)
+                            y_max = min(new_h, y_center + target_height//2)
+                            cropped_image = resized_image[y_min:y_max, :]
+                    else:
+                        # No people detected - use center cropping
+                        if FACE_DEBUG:
+                            print(f"No faces or people detected in {os.path.basename(image_file)} (landscape) - using center crop")
                         y_center = new_h // 2
                         y_min = max(0, y_center - target_height//2)
                         y_max = min(new_h, y_center + target_height//2)
                         cropped_image = resized_image[y_min:y_max, :]
-                else:
-                    # No faces detected - use center cropping
-                    y_center = new_h // 2
-                    y_min = max(0, y_center - target_height//2)
-                    y_max = min(new_h, y_center + target_height//2)
-                    cropped_image = resized_image[y_min:y_max, :]
                 
                 final_image = cropped_image
             else:
                 final_image = resized_image
         
-        # Process portrait images (taller than wide)
+        # Process portrait images (taller than wide) - This is the main use case!
         else:
             # Scale image to fit screen width, maintaining aspect ratio
             aspect_ratio = h / w
             new_w = target_width
             new_h = int(new_w * aspect_ratio)
-            resized_image = cv2.resize(image, (new_w, new_h))
+            # Use INTER_LANCZOS4 for better quality resize
+            resized_image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
             
-            # Use MediaPipe face detection for intelligent cropping
-            faces = detect_faces_mediapipe(resized_image)
+            # Try RetinaFace first for intelligent portrait cropping
+            faces = detect_faces_retinaface(resized_image)
             
             if faces:
                 if FACE_DEBUG:
                     print(f"Found {len(faces)} faces in {os.path.basename(image_file)} (portrait)")
                 
-                # Calculate optimal crop region using smart face prioritization
-                crop_region = calculate_smart_crop_region(faces, new_w, new_h, target_height)
+                # Calculate optimal crop region using portrait-aware algorithm
+                crop_region = calculate_portrait_aware_crop_region(faces, new_w, new_h, target_height, is_portrait=True)
                 
                 if crop_region:
                     y_min, y_max = crop_region
                     
                     if FACE_DEBUG:
-                        print(f"  Smart crop region: Y={y_min}-{y_max} (height={y_max-y_min})")
+                        print(f"  Face-based crop region: Y={y_min}-{y_max} (height={y_max-y_min})")
                     
                     cropped_image = resized_image[y_min:y_max, :]
                     final_image = cropped_image
                 else:
-                    # Fallback to center cropping if smart crop fails
+                    # Face detection found faces but crop failed - try person detection
+                    people = detect_people_yolo(resized_image)
+                    if people:
+                        if FACE_DEBUG:
+                            print(f"  Face crop failed, found {len(people)} people (portrait)")
+                        crop_region = calculate_portrait_aware_crop_region(people, new_w, new_h, target_height, is_portrait=True)
+                        if crop_region:
+                            y_min, y_max = crop_region
+                            if FACE_DEBUG:
+                                print(f"  Person-based crop region: Y={y_min}-{y_max} (height={y_max-y_min})")
+                            cropped_image = resized_image[y_min:y_max, :]
+                            final_image = cropped_image
+                        else:
+                            # Both failed - center crop
+                            y_center = new_h // 2
+                            y_min = max(0, y_center - target_height//2)
+                            y_max = min(new_h, y_center + target_height//2)
+                            cropped_image = resized_image[y_min:y_max, :]
+                            final_image = cropped_image
+                    else:
+                        # Center crop fallback
+                        y_center = new_h // 2
+                        y_min = max(0, y_center - target_height//2)
+                        y_max = min(new_h, y_center + target_height//2)
+                        cropped_image = resized_image[y_min:y_max, :]
+                        final_image = cropped_image
+            else:
+                # No faces detected - try person detection as fallback
+                people = detect_people_yolo(resized_image)
+                if people:
+                    if FACE_DEBUG:
+                        print(f"No faces found, detected {len(people)} people in {os.path.basename(image_file)} (portrait)")
+                    
+                    crop_region = calculate_portrait_aware_crop_region(people, new_w, new_h, target_height, is_portrait=True)
+                    if crop_region:
+                        y_min, y_max = crop_region
+                        if FACE_DEBUG:
+                            print(f"  Person-based crop region: Y={y_min}-{y_max} (height={y_max-y_min})")
+                        cropped_image = resized_image[y_min:y_max, :]
+                        final_image = cropped_image
+                    else:
+                        # Person detection failed - center crop
+                        y_center = new_h // 2
+                        y_min = max(0, y_center - target_height//2)
+                        y_max = min(new_h, y_center + target_height//2)
+                        cropped_image = resized_image[y_min:y_max, :]
+                        final_image = cropped_image
+                else:
+                    # No people detected - use center cropping
+                    if FACE_DEBUG:
+                        print(f"No faces or people detected in {os.path.basename(image_file)} (portrait) - using center crop")
                     y_center = new_h // 2
                     y_min = max(0, y_center - target_height//2)
                     y_max = min(new_h, y_center + target_height//2)
                     cropped_image = resized_image[y_min:y_max, :]
                     final_image = cropped_image
-            else:
-                # No faces detected - use center cropping
-                y_center = new_h // 2
-                y_min = max(0, y_center - target_height//2)
-                y_max = min(new_h, y_center + target_height//2)
-                cropped_image = resized_image[y_min:y_max, :]
-                final_image = cropped_image
         
         # Save the processed image with descriptive filename prefix
         output_filename = f"processed_{os.path.basename(image_file)}"
@@ -691,14 +979,14 @@ def main():
     
     print(f"Found {len(image_files)} images")
     
-    # MediaPipe face detection is built-in and doesn't require external model files
-    print("MediaPipe face detection enabled")
+    # RetinaFace + YOLO provides comprehensive subject detection
+    print("RetinaFace face detection + YOLO person detection enabled")
     
     # Prepare argument tuples for parallel processing
     # Each worker process needs: (image_path, output_dir)
     process_args = [(img_file, output_dir) for img_file in image_files]
     
-    print("Processing images with advanced face detection...")
+    print("Processing images with RetinaFace + YOLO detection and portrait-aware cropping...")
     # Utilize all available CPU cores for parallel image processing
     # This significantly reduces processing time for large image collections
     with Pool(cpu_count()) as pool:

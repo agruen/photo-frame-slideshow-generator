@@ -1,6 +1,6 @@
 # Photo Slideshow with Advanced Face Detection
 
-A Python script that automatically crops photos to fit your display resolution while keeping faces visible using cutting-edge AI face detection, then generates an HTML slideshow with weather and clock display.
+A Python script that automatically crops photos to fit your display resolution while keeping faces visible using RetinaFace AI face detection, then generates an HTML slideshow with weather and clock display. Optimized for portrait→landscape cropping.
 
 ## 🐳 **Docker Setup (Recommended - No Dependency Hassles!)**
 
@@ -59,25 +59,25 @@ That's it! No Python installations, no dependency conflicts, no version issues.
 ## Features
 
 - 🖼️ **Smart Image Processing**: Automatically resizes and crops images to fit your display
-- 🤖 **AI Face Detection**: Uses Google's MediaPipe (98.6% accuracy) to ensure faces remain visible when cropping
+- 🤖 **AI Face Detection**: Uses RetinaFace (91.4% AP accuracy) for superior face detection in portraits
 - 🌤️ **Weather Integration**: Shows current weather with icons using OpenWeatherMap API
 - 🕐 **Live Clock**: Displays current time with automatic updates
 - 📱 **Configurable Resolution**: Easy customization for any display size
 - ⚡ **Multiprocessing**: Fast parallel image processing
 - 🔄 **Random Slideshow**: Images change every 60 seconds
-- 🎯 **Smart Face Prioritization**: Intelligently handles multiple faces by prioritizing larger, more central faces
+- 🎯 **Portrait-Aware Cropping**: Specialized algorithm for portrait→landscape transformation with composition rules
 - 🐳 **Docker Support**: Zero-hassle setup with Docker
 
-## What's New: Advanced Face Detection
+## What's New: RetinaFace + Portrait-Aware Cropping
 
-This version features a **major upgrade** from the previous dlib-based face detection:
+This version features **RetinaFace face detection** with **portrait-aware cropping**:
 
-- **98.6% accuracy** (vs 84.5% with previous method)
-- **Better handling of profile views** and angled faces
-- **Improved performance in poor lighting** conditions
-- **Smart face prioritization** - larger, more central faces get priority
-- **Face completeness validation** - filters out partial face detections
-- **No external model files needed** - everything is built-in
+- **91.4% AP accuracy** on WIDER FACE dataset - industry leading
+- **Exceptional portrait handling** - designed for portrait→landscape cropping
+- **5-point facial landmarks** for face quality assessment
+- **Composition-aware cropping** using rule of thirds for portraits
+- **Portrait-specific weighting** favors upper portions naturally
+- **Adaptive padding** with different ratios for portraits vs landscapes
 
 ## 🐍 Manual Python Setup (Alternative to Docker)
 
@@ -86,12 +86,12 @@ This version features a **major upgrade** from the previous dlib-based face dete
 If you prefer to run without Docker:
 
 ### System Requirements
-- Python 3.9-3.12 (MediaPipe doesn't support 3.13 yet)
+- Python 3.9-3.12 (TensorFlow/RetinaFace compatibility)
 - Internet connection (for weather data)
 
 ### Installation Issues
 **Common problems you might encounter:**
-- MediaPipe doesn't work with Python 3.13 (too new)
+- TensorFlow/RetinaFace doesn't work with Python 3.13 (too new)
 - macOS requires virtual environments
 - Apple Silicon Macs have additional complexity
 - Dependency conflicts between packages
@@ -115,7 +115,7 @@ If you prefer to run without Docker:
 
 3. **Install dependencies:**
    ```bash
-   pip install opencv-python mediapipe numpy
+   pip install opencv-python retina-face tensorflow numpy
    ```
 
 ### For Windows/Linux Users
@@ -125,12 +125,12 @@ If you prefer to run without Docker:
 
 2. **Install libraries:**
    ```bash
-   pip install opencv-python mediapipe numpy
+   pip install opencv-python retina-face tensorflow numpy
    ```
 
 3. **If you get errors**, try:
    ```bash
-   python -m pip install opencv-python mediapipe numpy
+   python -m pip install opencv-python retina-face tensorflow numpy
    ```
 
 ## 📝 Configuration
@@ -155,6 +155,10 @@ environment:
   - MAX_FACE_PADDING_PX=120       # Maximum padding in pixels
   - FACE_SIZE_THRESHOLD=0.02      # Minimum face size (2% of image area)
   - FACE_DEBUG=false              # Set to true to see face detection details
+  
+  # Portrait-Aware Cropping Settings
+  - PORTRAIT_FACE_WEIGHT=0.7      # Weight for face position in portrait cropping
+  - PORTRAIT_UPPER_BIAS=0.3       # Bias toward upper portion of portrait
 ```
 
 ### Manual Python Setup
@@ -178,6 +182,10 @@ FACE_PADDING_RATIO = 0.2        # Padding around faces (20% of face size)
 MAX_FACE_PADDING_PX = 120       # Maximum padding in pixels
 FACE_SIZE_THRESHOLD = 0.02      # Minimum face size (2% of image area)
 FACE_DEBUG = False              # Set to True to see face detection details
+
+# Portrait-Aware Cropping Settings
+PORTRAIT_FACE_WEIGHT = 0.7      # Weight for face position in portrait cropping
+PORTRAIT_UPPER_BIAS = 0.3       # Bias toward upper portion of portrait
 ```
 
 ### Common Display Resolutions
@@ -229,7 +237,7 @@ The slideshow displays live weather data using OpenWeatherMap's free API.
 
 1. **Prepare your photos:**
    - Put images in the `photos/` folder
-   - Supported formats: JPG, JPEG, PNG, GIF
+   - Supported formats: JPG, JPEG, PNG
    - Any resolution - automatically resized and cropped
 
 2. **Configure settings:**
@@ -272,22 +280,23 @@ The slideshow displays live weather data using OpenWeatherMap's free API.
 
 ## How It Works
 
-### Advanced AI Face Detection
+### RetinaFace AI Face Detection
 
-The script uses Google's MediaPipe for state-of-the-art face detection:
+The script uses RetinaFace for industry-leading face detection:
 
 **Key Improvements:**
-- **98.6% accuracy** vs 84.5% with previous methods
-- **Smart face prioritization** - larger, more central faces get priority
-- **Face completeness validation** - filters out partial detections
-- **Confidence filtering** - only uses high-confidence detections (70%+)
+- **91.4% AP accuracy** on WIDER FACE hard dataset
+- **Superior portrait handling** - excellent for profile views and angled faces
+- **5-point facial landmarks** for face quality assessment
+- **Robust in poor lighting** and partial occlusion scenarios
 - **Size filtering** - ignores tiny faces that might be false positives
 
-**Face Detection Features:**
-- **Adaptive Padding**: Padding scales with face size (20% of face size, max 120px)
-- **Multiple Face Support**: Detects and intelligently handles ALL faces
-- **Weighted Centering**: Centers crop on the most important faces
-- **Boundary Validation**: Ensures all important faces remain within crop boundaries
+**Portrait-Aware Cropping Features:**
+- **Composition Rules**: Applies rule of thirds for natural portrait cropping
+- **Portrait-Specific Weighting**: Favors upper portions of portrait images
+- **Adaptive Padding**: Different top/bottom padding ratios for portraits
+- **Face Quality Assessment**: Uses landmarks to assess face completeness
+- **Multiple Face Support**: Intelligently prioritizes most important faces
 
 **Face Debug Mode:**
 To troubleshoot face detection, enable debug mode:
@@ -306,18 +315,18 @@ Found 3 faces in family_photo.jpg (portrait)
     Face detected: conf=0.892, bbox=(245,120,180,200), area=36000px (2.8% of image)
     Face detected: conf=0.756, bbox=(450,140,160,180), area=28800px (2.3% of image)
     Face detected: conf=0.834, bbox=(180,110,170,190), area=32300px (2.5% of image)
-  Smart crop region: Y=85-685 (height=800)
+  Portrait-aware crop region: Y=85-685 (height=800)
 ```
 
 ### Processing Logic
 
-**With AI Face Detection:**
+**With RetinaFace AI Detection:**
 1. Resizes images to target width while maintaining aspect ratio
-2. Detects all faces using MediaPipe's advanced AI
+2. Detects all faces using RetinaFace's advanced AI with 5-point landmarks
 3. Filters faces by confidence score (70%+) and size (2%+ of image)
-4. Calculates face importance using size and centrality weights
-5. Creates crop boundaries prioritizing the most important faces
-6. Validates all important faces remain visible in final crop
+4. Applies portrait-aware weighting (composition rules, face quality, position)
+5. Creates crop boundaries using portrait-specific algorithms
+6. Validates all important faces remain visible with proper composition
 
 **Without Face Detection (fallback):**
 1. Resizes images to target width
@@ -326,7 +335,7 @@ Found 3 faces in family_photo.jpg (portrait)
 
 ### How File Processing Works
 
-**Input:** Any mix of photo formats (JPG, PNG, GIF) and resolutions
+**Input:** Any mix of photo formats (JPG, PNG) and resolutions
 **Processing:** AI face detection → Smart cropping → Resizing to your screen
 **Output:** Optimized images + HTML slideshow
 
@@ -360,14 +369,14 @@ wedding_group.png   →      processed_wedding_group.png
 
 ### Manual Python Issues
 
-**"Could not find a version that satisfies the requirement mediapipe"**
-- You're probably using Python 3.13 - MediaPipe doesn't support it yet
+**"Could not find a version that satisfies the requirement retina-face"**
+- You're probably using Python 3.13 - TensorFlow/RetinaFace doesn't support it yet
 - Downgrade to Python 3.12: `brew install python@3.12` (macOS)
 - Use Docker instead (much easier!)
 
-**"No module named 'cv2'" / "No module named 'mediapipe'"**
+**"No module named 'cv2'" / "No module named 'retinaface'"**
 ```bash
-pip install opencv-python mediapipe numpy
+pip install opencv-python retina-face tensorflow numpy
 ```
 
 **macOS "externally managed environment" error**
@@ -401,7 +410,7 @@ pip install opencv-python mediapipe numpy
 
 ## 🎨 Customization
 
-### Face Detection Tuning
+### Face Detection & Portrait Cropping Tuning
 
 **Docker users:** Edit `docker-compose.yml`:
 ```yaml
@@ -411,6 +420,10 @@ pip install opencv-python mediapipe numpy
 - MAX_FACE_PADDING_PX=120    # Maximum padding to prevent excessive margins
 - FACE_SIZE_THRESHOLD=0.02   # Minimum face size as % of image (0.01-0.05)
 - FACE_DEBUG=true            # Enable to see detailed face detection info
+
+# Portrait-Aware Cropping Settings
+- PORTRAIT_FACE_WEIGHT=0.7   # Weight for face position in portraits (0.3-1.0)
+- PORTRAIT_UPPER_BIAS=0.3    # Bias toward upper portion of portraits (0.1-0.5)
 ```
 
 **Python users:** Edit variables at top of `crop-and-slideshow.py`
@@ -547,13 +560,13 @@ This project is open source. Feel free to modify and distribute.
 
 ## 📚 Changelog
 
-**Version 2.0 - MediaPipe Upgrade + Docker:**
-- 🤖 Upgraded from dlib to MediaPipe (98.6% face detection accuracy)
-- 🧠 Added smart face prioritization algorithm
-- 👥 Improved handling of multiple faces
-- ✅ Added face completeness validation
-- 🗑️ Removed dependency on external model files
-- 📐 Enhanced cropping algorithm with weighted center-of-mass
-- 🌙 Better performance in challenging lighting conditions
-- 🐳 **NEW: Complete Docker support for zero-hassle setup**
-- 📖 **NEW: Comprehensive documentation for all skill levels**
+**Version 3.0 - RetinaFace + Portrait-Aware Cropping:**
+- 🤖 Upgraded from MediaPipe to RetinaFace (91.4% AP accuracy)
+- 🖼️ **NEW: Portrait-aware cropping algorithm** for portrait→landscape transformation
+- 🎨 **NEW: Composition-based cropping** using rule of thirds
+- 👥 **NEW: Portrait-specific face weighting** favors upper portions
+- 📍 **NEW: 5-point facial landmarks** for face quality assessment
+- 📐 **NEW: Adaptive padding** with different ratios for portraits vs landscapes
+- 🌙 Superior performance in challenging lighting and angled faces
+- 🐳 Complete Docker support for zero-hassle setup
+- 📚 Comprehensive documentation for all skill levels
